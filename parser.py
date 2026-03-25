@@ -428,8 +428,31 @@ def open_db_view():
         # UI
         ctk.CTkLabel(win, text=f"Выберите значения для '{col}':").pack(anchor="w", pady=(6,4), padx=10)
         entry = ctk.CTkEntry(win, textvariable=search_var); entry.pack(fill="x", padx=14, pady=2)
-        frame_checks = ctk.CTkFrame(win); frame_checks.pack(fill="both", expand=True, padx=10, pady=4)
+        frame_scroll = ctk.CTkFrame(win)
+        frame_scroll.pack(fill="both", expand=True, padx=10, pady=(4, 0))
+        from tkinter import Scrollbar, Canvas
+
+        canvas = Canvas(frame_scroll, bd=0, highlightthickness=0, background="#232323", relief='flat')
+        scrollbar = Scrollbar(frame_scroll, orient="vertical", command=canvas.yview)
+        frame_checks = ctk.CTkFrame(canvas)
+        frame_checks_id = canvas.create_window((0, 0), window=frame_checks, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
         checkboxes = []
+
+        def on_frame_configure(event=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        frame_checks.bind("<Configure>", on_frame_configure)
+
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
         def draw_checkboxes():
             for w in checkboxes:
                 w.destroy()
@@ -441,18 +464,24 @@ def open_db_view():
                 b = ctk.CTkCheckBox(frame_checks, text=str(v), variable=check_vars[idx])
                 b.pack(anchor="w")
                 checkboxes.append(b)
+
         draw_checkboxes()
+
         # Фильтровать чекбоксы по поиску
         def on_search(*_):
             draw_checkboxes()
+
         search_var.trace_add("write", on_search)
-        btn_all = ctk.CTkButton(win, text="Все", command=check_all); btn_all.pack(side="left", padx=8, pady=7)
-        btn_none = ctk.CTkButton(win, text="Сброс", command=clear); btn_none.pack(side="left", padx=2)
-        btn_apply = ctk.CTkButton(win, text="Применить", command=apply_filter); btn_apply.pack(side="right", padx=15)
-    #
-        win.transient(database_window)
-        win.wait_visibility()
-        win.grab_set()
+
+        # БЛОК КНОПОК — всегда понизу, фиксирован
+        btns_frame = ctk.CTkFrame(win)
+        btns_frame.pack(fill="x", side="bottom", pady=8, padx=8)
+        btn_all = ctk.CTkButton(btns_frame, text="Все", command=check_all, width=80)
+        btn_all.pack(side="left", padx=5)
+        btn_none = ctk.CTkButton(btns_frame, text="Сброс", command=clear, width=80)
+        btn_none.pack(side="left", padx=5)
+        btn_apply = ctk.CTkButton(btns_frame, text="Применить", command=apply_filter, width=120)
+        btn_apply.pack(side="right", padx=5)
 
     def reset_filters():
         # Полное обновление всех фильтров (всё включено)
