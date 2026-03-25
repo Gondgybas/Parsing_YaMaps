@@ -9,6 +9,7 @@ from selenium.webdriver.support import expected_conditions as EC
 import time
 import pandas as pd
 import re
+import requests
 from bs4 import BeautifulSoup
 import urllib.parse
 
@@ -42,58 +43,56 @@ def transliterate_name(name):
     return result
 
 
-def find_sites_and_parse_contacts_with_selenium(driver, company_name, city):
-    print("=== ОТЛАДКА ВЫДАЧИ GOOGLE ===")
-    result_sites = []
+def find_sites_from_yandex(company_name, city):
+    print("=== ОТЛАДКА ВЫДАЧИ ЯНДЕКСА ===")
     search_variants = [
         f"{company_name} {city} сайт",
         f"{transliterate_name(company_name)} {city} сайт",
         f"{company_name.replace('-', ' ')} {city} сайт"
     ]
+    headers = {"User-Agent": "Mozilla/5.0"}
+    result_sites = []
     for query in search_variants:
-        print(f"\nGoogle search query: {query}")
-        url = "https://www.google.com/search?q=" + urllib.parse.quote_plus(query)
-        print(f"Google search url: {url}")
-        driver.execute_script("window.open('');")
-        driver.switch_to.window(driver.window_handles[-1])
-        driver.get(url)
-        time.sleep(5)
-        # Сохраняем весь html выдачи для диагностики, если надо:
-        page_source = driver.page_source
-        soup = BeautifulSoup(page_source, "html.parser")
-        all_links = []
-        # Универсальный поиск всех ссылок из поисковой выдачи
-        for i, a in enumerate(soup.find_all('a', href=True)[:50]):
-            href = a['href']
-            text = a.get_text(strip=True)
-            print(f"!!! НАЙДЕН HREF: {href} text: {text}")
-            # ищем реальные сайты (http/https только + exclude соц/директории)
-            if (
-                    href.startswith("http") and
-                    "google" not in href and
-                    "yandex" not in href and
-                    "2gis" not in href and
-                    "maps" not in href and
-                    "rambler" not in href and
-                    (".jpg" not in href and ".png" not in href)
-            ):
-                if href not in all_links and len(all_links) < 3:
-                    all_links.append(href)
-        driver.close()
-        driver.switch_to.window(driver.window_handles[0])
-        if all_links:
-            print("Список сайтов, которые попадут в парсинг:")
-            for i, site in enumerate(all_links, 1):
-                print(f"{i}) {site}")
-            return all_links
-        else:
-            print("На этом поисковом запросе ни одной нормальной ссылки не найдено")
-    print("! НЕ найдено ни одной ссылки в Гугле ни по одному поисковому варианту")
+        print(f"\nYandex search query: {query}")
+        url = "https://yandex.ru/search/?text=" + urllib.parse.quote_plus(query)
+        print(f"Yandex search url: {url}")
+        try:
+            resp = requests.get(url, headers=headers, timeout=10)
+            if resp.status_code != 200:
+                print("Яндекс не отдал страницу или капча.")
+                continue
+            soup = BeautifulSoup(resp.text, "html.parser")
+            all_links = []
+            # Яндекс часто использует класс "Link" для ссылок на сайты в выдаче
+            for a in soup.find_all('a', href=True):
+                href = a['href']
+                text = a.get_text(strip=True)
+                print(f"!!! НАЙДЕН HREF: {href} text: {text}")
+                if (
+                        href.startswith("http")
+                        and "yandex" not in href
+                        and "2gis" not in href
+                        and "maps." not in href
+                        and "rambler" not in href
+                        and (".jpg" not in href and ".png" not in href)
+                ):
+                    if href not in all_links and len(all_links) < 3:
+                        all_links.append(href)
+            if all_links:
+                print("Списо�� сайтов, которые попадут в парсинг:")
+                for i, site in enumerate(all_links, 1):
+                    print(f"{i}) {site}")
+                return all_links
+            else:
+                print("На этом поисковом запросе ни одной нормальной ссылки не найдено")
+        except Exception as e:
+            print(f"Ошибка поиска сайта в Яндексе: {e}")
+            continue
+    print("! НЕ найдено ни одной ссылки в Яндексе ни по одному поисковому варианту")
     return result_sites
 
 
 def parse_contacts_from_site(site_url, email, site_phones):
-    import requests
     headers = {"User-Agent": "Mozilla/5.0"}
     pages_to_check = [
         "",
@@ -135,6 +134,58 @@ def parse_contacts_from_site(site_url, email, site_phones):
             continue
     return email, site_phones
 
+def find_sites_from_yandex_via_selenium(driver, company_name, city):
+    import urllib.parse
+    from bs4 import BeautifulSoup
+    import time
+
+    print("=== ОТЛАДКА В��ДАЧИ ЯНДЕКСА (SELENIUM) ===")
+    search_variants = [
+        f"{company_name} {city} сайт",
+        f"{transliterate_name(company_name)} {city} сайт",
+        f"{company_name.replace('-', ' ')} {city} сайт"
+    ]
+    result_sites = []
+    for query in search_variants:
+        print(f"\nYandex search query: {query}")
+        url = "https://yandex.ru/search/?text=" + urllib.parse.quote_plus(query)
+        print(f"Открываю браузер с Яндекс-поиском: {url}")
+        driver.execute_script("window.open('');")
+        driver.switch_to.window(driver.window_handles[-1])
+        driver.get(url)
+        time.sleep(10)   # ждём ручного прохождения капчи (если она появилась)
+        # выводим предупреждение если есть текст капчи
+        html = driver.page_source
+        if "smart-captcha" in html or "Капча" in html or "captcha" in html:
+            print("=== КАПЧА === Пройди её вручную в окне selenium и продолжи")
+            input("Нажми ENTER когда капча решена и страница с выдачей загружена...")
+        soup = BeautifulSoup(driver.page_source, "html.parser")
+        all_links = []
+        for a in soup.find_all('a', href=True):
+            href = a['href']
+            text = a.get_text(strip=True)
+            print(f"!!! НАЙДЕН HREF: {href} text: {text}")
+            if (
+                href.startswith("http")
+                and "yandex" not in href
+                and "2gis" not in href
+                and "maps." not in href
+                and "rambler" not in href
+                and (".jpg" not in href and ".png" not in href)
+            ):
+                if href not in all_links and len(all_links) < 3:
+                    all_links.append(href)
+        driver.close()
+        driver.switch_to.window(driver.window_handles[0])
+        if all_links:
+            print("Список сайтов, которые попадут в парсинг:")
+            for i, site in enumerate(all_links, 1):
+                print(f"{i}) {site}")
+            return all_links
+        else:
+            print("На этом поисковом запросе ни одной нормальной ссылки не найдено")
+    print("! НЕ найдено ни одной ссылки в Яндексе ни по одному поисковому варианту")
+    return result_sites
 
 # --- Основная программа ---
 
@@ -248,11 +299,11 @@ for idx, link in enumerate(links, 1):
             except Exception as e:
                 print(f"Ошибка обхода страниц сайта компании: {e}")
         else:
-            print("Сайт НЕ найден на Яндекс.Картах, ищем через Google...")
-            found_sites = find_sites_and_parse_contacts_with_selenium(driver, name, search_query.split()[-1])
+            print("Сайт НЕ найден на Яндекс.Картах, ищем через Яндекс-поиск...")
+            found_sites = find_sites_from_yandex_via_selenium(driver, name, search_query.split()[-1])
             if found_sites:
                 for site in found_sites:
-                    print(f"Пробуем сайт из Google: {site}")
+                    print(f"Пробуем сайт из Яндекса: {site}")
                     email_candidate, phone_candidate = parse_contacts_from_site(site, "", "")
                     if email_candidate:
                         print(f"На {site} найден email: {email_candidate}")
@@ -262,9 +313,9 @@ for idx, link in enumerate(links, 1):
                     if phone_candidate and not site_phones:
                         site_phones = phone_candidate
                 if not email:
-                    print("Не удалось найти email на первых 3 сайтах Google")
+                    print("Не удалось найти email на первых 3 сайтах Яндекса")
             else:
-                print("Не найден ни один сайт организации через Google. Пропускаем парсинг.")
+                print("Не найден ни один сайт организации через Яндекс. Пропускаем парсинг.")
 
         companies.append({
             "Название": name,
