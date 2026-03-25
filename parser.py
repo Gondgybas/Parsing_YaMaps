@@ -1,15 +1,10 @@
 import customtkinter as ctk
 import threading
 import datetime
-import sys
-import os
 from tkinter.scrolledtext import ScrolledText
 import pandas as pd
 
-# -------------- Ваша логика парсера как функция ---------------
-
-def run_parser(search_query, log_func):
-    # Импортируем прямо тут, чтобы после pip install всё корректно грузилось
+def run_parser(search_query, log_func, company_limit=None):
     import time, re, requests, urllib.parse
     from selenium import webdriver
     from selenium.webdriver.common.by import By
@@ -148,7 +143,11 @@ def run_parser(search_query, log_func):
             pass
     links = list(set(links))
     log_func(f"Уникальных карточек: {len(links)}")
-    links = links[:3]
+    if company_limit and str(company_limit).isdigit() and int(company_limit) > 0:
+        links = links[:int(company_limit)]
+        log_func(f"Парсинг только первых {company_limit} компаний.")
+    else:
+        log_func("Парсим все найденные компании.")
     for idx, link in enumerate(links, 1):
         log_func(f"\n=== Парсим карточку {idx} ===\nСсылка: {link}")
         try:
@@ -197,7 +196,6 @@ def run_parser(search_query, log_func):
                 log_func(f"Адрес: {address}")
             except:
                 log_func("Адрес: не найден")
-            # парсим сайт или ищем в яндексе
             if website:
                 log_func(f"Парсим сайт компании: {website}")
                 try:
@@ -244,7 +242,7 @@ def run_parser(search_query, log_func):
 try:
     import customtkinter as ctk
 except ImportError:
-    raise SystemExit("Перед запуском этого кода введи в терминале: pip install customtkinter")
+    raise SystemExit("Перед запуском: pip install customtkinter")
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("dark-blue")
@@ -252,9 +250,12 @@ ctk.set_default_color_theme("dark-blue")
 root = ctk.CTk()
 root.title("Яндекс-Карты КонтактПарсер")
 
-root.geometry("920x650")
+root.geometry("950x700")
+frame = ctk.CTkFrame(root)
+frame.pack(padx=15, pady=15, fill="both", expand=True)
 
 query_var = ctk.StringVar(value="металлообработка Подольск")
+limit_var = ctk.StringVar(value="")
 
 def log(msg):
     log_text.configure(state="normal")
@@ -266,22 +267,25 @@ def log(msg):
 def do_parse():
     btn_parse.configure(state="disabled")
     query = query_var.get()
-    t = threading.Thread(target=run_parser, args=(query, log))
+    limit = limit_var.get().strip()
+    t = threading.Thread(target=run_parser, args=(query, log, limit))
     t.start()
     def reenable():
         t.join()
         btn_parse.configure(state="normal")
     threading.Thread(target=reenable).start()
 
-frame = ctk.CTkFrame(root)
-frame.pack(padx=15, pady=15, fill="both", expand=True)
-
 lbl_query = ctk.CTkLabel(frame, text="Поисковый запрос:", anchor="w")
-lbl_query.pack(anchor="w", pady=(0,5))
+lbl_query.pack(anchor="w", pady=(4,4))
 query_entry = ctk.CTkEntry(frame, textvariable=query_var, width=500, font=("Arial", 15))
-query_entry.pack(anchor="w", pady=(0,15))
+query_entry.pack(anchor="w", pady=(0,12))
 
-btn_parse = ctk.CTkButton(frame, text="Начать парсинг", command=do_parse, width=180, height=40)
+lbl_limit = ctk.CTkLabel(frame, text="Сколько компаний парсить? (пусто = все)", anchor="w")
+lbl_limit.pack(anchor="w")
+limit_entry = ctk.CTkEntry(frame, textvariable=limit_var, width=100, font=("Arial", 15))
+limit_entry.pack(anchor="w", pady=(0,18))
+
+btn_parse = ctk.CTkButton(frame, text="Начать парсинг", command=do_parse, width=200, height=42)
 btn_parse.pack(anchor="w", pady=(0,24))
 
 lbl_log = ctk.CTkLabel(frame, text="Сообщения отладки / ход работы:")
