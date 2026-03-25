@@ -6,11 +6,14 @@ from tkinter import ttk, simpledialog
 import pandas as pd
 import os
 import re
+from threading import Event
 
 BLACK_DOMAINS = ["vk.com", "avito.ru", "avito.com", "hh.ru", "ok.ru", "youtube.com", "facebook.com", "instagram.com",
                  "twitter.com", "t.me", "2gis.ru", ".yandex.", "ya.ru", "mail.ru", "rb.ru", "google.com", "google.ru"]
 
 EXCEL_FILENAME = "contacts_database.xlsx"  # Файл с единой базой
+
+parser_stop_event = Event()
 
 def run_parser(search_query, log_func, company_limit=None):
     import time, re, requests, urllib.parse
@@ -205,7 +208,16 @@ def run_parser(search_query, log_func, company_limit=None):
     else:
         log_func("Парсим все найденные компании.")
 
+    global parser_stop_event
+    parser_stop_event.clear()
+    companies = []
+
+    # далее как обычно...
+
     for idx, link in enumerate(links, 1):
+        if parser_stop_event.is_set():
+            log_func("Операция остановлена оператором.")
+            break
         log_func(f"\n=== Парсим карточку {idx} ===\nСсылка: {link}")
         try:
             driver.get(link)
@@ -311,6 +323,28 @@ def run_parser(search_query, log_func, company_limit=None):
                 continue
 
             companies.append(new_info)
+
+            # Сохраняем после каждой компании
+            if len(companies) > 0:
+                # Добавить к старой базе
+                df_add = pd.DataFrame([new_info])
+                if os.path.exists(EXCEL_FILENAME):
+                    df_main_cur = pd.read_excel(EXCEL_FILENAME)
+                    df_final = pd.concat([df_main_cur, df_add], ignore_index=True)
+                else:
+                    df_final = df_add
+                df_final.to_excel(EXCEL_FILENAME, index=False)
+                log_func("Результаты по текущей компании сохранены в базу.")
+
+                # Автоматическое обновление окна просмотра базы
+                try:
+                    if database_window is not None and database_window.winfo_exists():
+                        # перерисовать содержимое (функцию show_frame(filtered_df) надо перевести во внешний scope)
+                        df = pd.read_excel(EXCEL_FILENAME)
+                        show_frame(df)
+                except Exception as ex:
+                    log_func(f"(Не удалось обновить окно просмотра базы: {ex})")
+
             log_func(f"--- Итог по карточке ---\nEmail: {email}\nТелефон (Яндекс): {phone}\nТелефон (сайт): {site_phones}\nСайт: {website}\nАдрес: {address}\n")
         except Exception as e:
             log_func(f"ОШИБКА ГЛАВНОГО ЦИКЛА: {e}")
@@ -377,6 +411,9 @@ btn_parse.pack(anchor="w", pady=(0,24))
 
 btn_dbview = ctk.CTkButton(frame, text="Посмотреть Базу", command=lambda: open_db_view(), width=180, height=38)
 btn_dbview.pack(anchor="w", pady=(0,14))
+
+btn_stop = ctk.CTkButton(frame, text="Остановить парсинг", command=lambda: parser_stop_event.set(), width=200, height=42, fg_color="red")
+btn_stop.pack(anchor="w", pady=(0, 14))
 
 lbl_log = ctk.CTkLabel(frame, text="Сообщения отладки / ход работы:")
 lbl_log.pack(anchor="w", pady=(0,5))
