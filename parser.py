@@ -166,12 +166,29 @@ def run_parser(search_query, log_func, company_limit=None):
     search_input.send_keys(Keys.ENTER)
     time.sleep(5)
     companies = []
-    log_func("Скроллим список...")
-    for _ in range(10):
-        driver.find_element(By.TAG_NAME, "body").send_keys(Keys.PAGE_DOWN)
-        time.sleep(1)
+    import tkinter.messagebox
+
+    log_func(
+        "Пожалуйста, самостоятельно прокрутите список компаний Яндекс.Карт вручную до самого конца, чтобы все карточки подгрузились!")
+    tkinter.messagebox.showinfo(
+        "Ручная прокрутка",
+        "Прокрутите список организаций в Яндекс.Картах до НИЗУ ВРУЧНУЮ (мышкой, колесиком или PageDown), "
+        "чтобы ВСЕ компании появились на странице.\n\nПосле этого нажмите OK для запуска парсинга."
+    )
     cards = driver.find_elements(By.CSS_SELECTOR, "a[href*='/org/']")
-    log_func(f"Найдено карточек: {len(cards)}")
+    log_func(f"После прокрутки найдено карточек: {len(cards)}")
+    # Далее обработка links идёт как было:
+    links = []
+    for card in cards:
+        try:
+            link = card.get_attribute("href")
+            if link and "/org/" in link:
+                links.append(link)
+        except:
+            pass
+    links = list(set(links))
+    log_func(f"Уникальных карточек: {len(links)}")
+
     links = []
     for card in cards:
         try:
