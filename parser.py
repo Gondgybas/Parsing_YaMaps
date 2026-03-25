@@ -2,6 +2,7 @@ import customtkinter as ctk
 import threading
 import datetime
 from tkinter.scrolledtext import ScrolledText
+from tkinter import ttk
 import pandas as pd
 import os
 
@@ -49,11 +50,16 @@ def run_parser(search_query, log_func, company_limit=None):
         return '; '.join(uniq)
 
     def is_valid_email(email):
+        if (
+                "@stacks.vk-portal.net" in email.lower()
+                or email.lower().endswith("@stacks.vk-portal.net")
+        ):
+            return False
         return (
-            len(email) > 6 and
-            "." in email.split("@")[-1] and
-            not email.isdigit() and
-            email.count("@") == 1
+                len(email) > 6 and
+                "." in email.split("@")[-1] and
+                not email.isdigit() and
+                email.count("@") == 1
         )
 
     def transliterate_name(name):
@@ -310,6 +316,7 @@ ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("dark-blue")
 
 root = ctk.CTk()
+database_window = None
 root.title("Яндекс-Карты КонтактПарсер - Единая База")
 
 root.geometry("950x700")
@@ -350,9 +357,45 @@ limit_entry.pack(anchor="w", pady=(0,18))
 btn_parse = ctk.CTkButton(frame, text="Начать парсинг", command=do_parse, width=200, height=42)
 btn_parse.pack(anchor="w", pady=(0,24))
 
+btn_dbview = ctk.CTkButton(frame, text="Посмотреть Базу", command=lambda: open_db_view(), width=180, height=38)
+btn_dbview.pack(anchor="w", pady=(0,14))
+
 lbl_log = ctk.CTkLabel(frame, text="Сообщения отладки / ход работы:")
 lbl_log.pack(anchor="w", pady=(0,5))
 log_text = ScrolledText(frame, height=24, width=100, bg="#212223", fg="#D6D6D6", font=("Consolas", 12), wrap="word", state="disabled", insertbackground="white")
 log_text.pack(fill="both", expand=True, padx=(0,0), pady=(0,10))
+
+def open_db_view():
+    global database_window
+    if database_window is not None and database_window.winfo_exists():
+        database_window.focus_set()
+        return
+    if not os.path.exists(EXCEL_FILENAME):
+        from tkinter import messagebox
+        messagebox.showinfo("Нет базы", "Файл базы еще не создан. Сначала сделайте хотя бы один парсинг.")
+        return
+    df = pd.read_excel(EXCEL_FILENAME)
+    database_window = ctk.CTkToplevel(root)
+    database_window.title("Просмотр базы данных")
+    database_window.geometry("1200x650")
+
+    frm = ctk.CTkFrame(database_window)
+    frm.pack(fill="both", expand=True)
+    tree = ttk.Treeview(frm, show="headings")
+    # Настройка колонок
+    columns = list(df.columns)
+    tree["columns"] = columns
+    for col in columns:
+        tree.heading(col, text=col)
+        tree.column(col, width=160, anchor="w")
+    # Заполняем строки (limit для памяти, можно убрать если нужно больше)
+    for idx, row in df.iterrows():
+        tree.insert("", "end", values=[str(row[col]) if pd.notna(row[col]) else "" for col in columns])
+        if idx > 999: break  # Показываем не более 1000 строк для скорости
+    # Добавляем scroll-бар
+    vsb = ttk.Scrollbar(frm, orient="vertical", command=tree.yview)
+    tree.configure(yscrollcommand=vsb.set)
+    vsb.pack(side="right", fill="y")
+    tree.pack(fill="both", expand=True, side="left")
 
 root.mainloop()
