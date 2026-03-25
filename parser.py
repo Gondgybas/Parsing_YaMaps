@@ -344,6 +344,17 @@ def run_parser(search_query, log_func, company_limit=None):
                         show_frame(df)
                 except Exception as ex:
                     log_func(f"(Не удалось обновить окно просмотра базы: {ex})")
+                    df_final.to_excel(EXCEL_FILENAME, index=False)
+
+                    try:
+                        if (database_window is not None
+                                and hasattr(database_window, "winfo_exists") and database_window.winfo_exists()):
+                            df_ = pd.read_excel(EXCEL_FILENAME)
+                            show_db_table(df_)
+                    except Exception as ex:
+                        log_func(f"(Не удалось обновить окно просмотра базы: {ex})")
+
+                    log_func("Результаты по текущей компании сохранены в базу.")
 
             log_func(f"--- Итог по карточке ---\nEmail: {email}\nТелефон (Яндекс): {phone}\nТелефон (сайт): {site_phones}\nСайт: {website}\nАдрес: {address}\n")
         except Exception as e:
@@ -420,16 +431,37 @@ lbl_log.pack(anchor="w", pady=(0,5))
 log_text = ScrolledText(frame, height=24, width=100, bg="#212223", fg="#D6D6D6", font=("Consolas", 12), wrap="word", state="disabled", insertbackground="white")
 log_text.pack(fill="both", expand=True, padx=(0,0), pady=(0,10))
 
+database_window = None
+db_tree = None
+db_columns = None
+
+def show_db_table(df):
+    global db_tree, db_columns
+    if db_tree is None:
+        return
+    db_tree.delete(*db_tree.get_children())
+    for i, row in df.iterrows():
+        db_tree.insert("", "end", values=[str(row[c]) if pd.notna(row[c]) else "" for c in db_columns])
+
 def open_db_view():
-    global database_window
-    if database_window is not None and database_window.winfo_exists():
+    global database_window, db_tree, db_columns
+    if (database_window is not None
+        and hasattr(database_window, "winfo_exists") and database_window.winfo_exists()):
+        # Если окно уже открыто — просто обновить таблицу и сфокусироваться
+        try:
+            df = pd.read_excel(EXCEL_FILENAME)
+            show_db_table(df)
+        except Exception:
+            pass
         database_window.focus_set()
         return
+
     if not os.path.exists(EXCEL_FILENAME):
         from tkinter import messagebox
         messagebox.showinfo("Нет базы", "Файл базы ещё не создан. Сначала сделайте хотя бы один парсинг.")
         return
     df = pd.read_excel(EXCEL_FILENAME)
+
     database_window = ctk.CTkToplevel(root)
     database_window.title("Просмотр базы данных (Excel-фильтр)")
     database_window.geometry("1280x700")
@@ -437,130 +469,22 @@ def open_db_view():
     frm = ctk.CTkFrame(database_window)
     frm.pack(fill="both", expand=True, padx=10, pady=5)
 
-    # Храним полный DataFrame, фильтруемый df_view
-    df_full = df.copy()
-    df_view = df.copy()
-
-    columns = list(df.columns)
-    tree = ttk.Treeview(frm, show="headings")
-    tree["columns"] = columns
-
-    # Для чекбоксов со всеми уникальными значениями столбца:
-    col_filters = {col: set(df_full[col].dropna().unique().tolist()) for col in columns}
-
-    def show_frame(filtered_df):
-        # Сброс Treeview
-        for row in tree.get_children():
-            tree.delete(row)
-        for i, row in filtered_df.iterrows():
-            tree.insert("", "end", values=[str(row[c]) if pd.notna(row[c]) else "" for c in columns])
-
-    # Excel-стайл ФИЛЬТР для столбца
-    def open_filter_menu(col_idx):
-        col = columns[col_idx]
-        win = ctk.CTkToplevel(database_window)
-        win.title(f"Фильтр по: {col}")
-        win.geometry("350x450")
-        vals = sorted(list(set(df_full[col].dropna().unique().tolist())))
-        search_var = ctk.StringVar()
-        check_vars = [ctk.BooleanVar(value=(v in col_filters[col])) for v in vals]
-        def apply_filter():
-            selected = [v for v, vvar in zip(vals, check_vars) if vvar.get()]
-            col_filters[col] = set(selected)
-            filtered = df_full.copy()
-            for c, allowed in col_filters.items():
-                if allowed != set(df_full[c].dropna().unique().tolist()):
-                    filtered = filtered[filtered[c].isin(allowed)]
-            show_frame(filtered)
-            win.destroy()
-        def check_all():   # выбрать всё
-            for v in check_vars:
-                v.set(True)
-        def clear():       # снять всё
-            for v in check_vars:
-                v.set(False)
-        # UI
-        ctk.CTkLabel(win, text=f"Выберите значения для '{col}':").pack(anchor="w", pady=(6,4), padx=10)
-        entry = ctk.CTkEntry(win, textvariable=search_var); entry.pack(fill="x", padx=14, pady=2)
-        frame_scroll = ctk.CTkFrame(win)
-        frame_scroll.pack(fill="both", expand=True, padx=10, pady=(4, 0))
-        from tkinter import Scrollbar, Canvas
-
-        canvas = Canvas(frame_scroll, bd=0, highlightthickness=0, background="#232323", relief='flat')
-        scrollbar = Scrollbar(frame_scroll, orient="vertical", command=canvas.yview)
-        frame_checks = ctk.CTkFrame(canvas)
-        frame_checks_id = canvas.create_window((0, 0), window=frame_checks, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-
-        checkboxes = []
-
-        def on_frame_configure(event=None):
-            canvas.configure(scrollregion=canvas.bbox("all"))
-
-        frame_checks.bind("<Configure>", on_frame_configure)
-
-        def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
-        canvas.bind_all("<MouseWheel>", _on_mousewheel)
-
-        def draw_checkboxes():
-            for w in checkboxes:
-                w.destroy()
-            checkboxes.clear()
-            value_query = search_var.get().lower()
-            for idx, v in enumerate(vals):
-                if value_query and value_query not in str(v).lower():
-                    continue
-                b = ctk.CTkCheckBox(frame_checks, text=str(v), variable=check_vars[idx])
-                b.pack(anchor="w")
-                checkboxes.append(b)
-
-        draw_checkboxes()
-
-        # Фильтровать чекбоксы по поиску
-        def on_search(*_):
-            draw_checkboxes()
-
-        search_var.trace_add("write", on_search)
-
-        # БЛОК КНОПОК — всегда понизу, фиксирован
-        btns_frame = ctk.CTkFrame(win)
-        btns_frame.pack(fill="x", side="bottom", pady=8, padx=8)
-        btn_all = ctk.CTkButton(btns_frame, text="Все", command=check_all, width=80)
-        btn_all.pack(side="left", padx=5)
-        btn_none = ctk.CTkButton(btns_frame, text="Сброс", command=clear, width=80)
-        btn_none.pack(side="left", padx=5)
-        btn_apply = ctk.CTkButton(btns_frame, text="Применить", command=apply_filter, width=120)
-        btn_apply.pack(side="right", padx=5)
-
-    def reset_filters():
-        # Полное обновление всех фильтров (всё включено)
-        for c in columns:
-            col_filters[c] = set(df_full[c].dropna().unique().tolist())
-        show_frame(df_full)
-
-    # Настройка колонок Treeview и менюшка-фильтр
-    style = ttk.Style(tree)
+    db_columns = list(df.columns)
+    db_tree = ttk.Treeview(frm, show="headings")
+    db_tree["columns"] = db_columns
+    style = ttk.Style(db_tree)
     style.theme_use("clam")
     style.configure("Treeview.Heading", background="#1a1a1a", foreground="#d6d6d6", relief="flat")
-    for idx, col in enumerate(columns):
-        tree.heading(col, text=col, anchor="w",
-                     command=lambda col_idx=idx: open_filter_menu(col_idx))
-        tree.column(col, width=170, anchor="w")
-    tree.pack(fill="both", expand=True, side="left")
-    show_frame(df_full)
+    for col in db_columns:
+        db_tree.heading(col, text=col, anchor="w")
+        db_tree.column(col, width=170, anchor="w")
+    db_tree.pack(fill="both", expand=True, side="left")
 
     # Scrollbar
-    vsb = ttk.Scrollbar(frm, orient="vertical", command=tree.yview)
-    tree.configure(yscrollcommand=vsb.set)
+    vsb = ttk.Scrollbar(frm, orient="vertical", command=db_tree.yview)
+    db_tree.configure(yscrollcommand=vsb.set)
     vsb.pack(side="right", fill="y")
 
-    # Reset filters
-    btn_reset = ctk.CTkButton(database_window, text="Сбросить все фильтры", command=reset_filters)
-    btn_reset.pack(pady=8)
+    show_db_table(df)
 
 root.mainloop()
