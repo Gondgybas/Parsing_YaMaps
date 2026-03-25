@@ -2,9 +2,10 @@ import customtkinter as ctk
 import threading
 import datetime
 from tkinter.scrolledtext import ScrolledText
-from tkinter import ttk
+from tkinter import ttk, simpledialog
 import pandas as pd
 import os
+import re
 
 BLACK_DOMAINS = ["vk.com", "avito.ru", "avito.com", "hh.ru", "ok.ru", "youtube.com", "facebook.com", "instagram.com",
                  "twitter.com", "t.me", "2gis.ru", ".yandex.", "ya.ru", "mail.ru", "rb.ru", "google.com", "google.ru"]
@@ -372,30 +373,111 @@ def open_db_view():
         return
     if not os.path.exists(EXCEL_FILENAME):
         from tkinter import messagebox
-        messagebox.showinfo("Нет базы", "Файл базы еще не создан. Сначала сделайте хотя бы один парсинг.")
+        messagebox.showinfo("Нет базы", "Файл базы ещё не создан. Сначала сделайте хотя бы один парсинг.")
         return
     df = pd.read_excel(EXCEL_FILENAME)
     database_window = ctk.CTkToplevel(root)
-    database_window.title("Просмотр базы данных")
-    database_window.geometry("1200x650")
+    database_window.title("Просмотр базы данных (Excel-фильтр)")
+    database_window.geometry("1280x700")
 
     frm = ctk.CTkFrame(database_window)
-    frm.pack(fill="both", expand=True)
-    tree = ttk.Treeview(frm, show="headings")
-    # Настройка колонок
+    frm.pack(fill="both", expand=True, padx=10, pady=5)
+
+    # Храним полный DataFrame, фильтруемый df_view
+    df_full = df.copy()
+    df_view = df.copy()
+
     columns = list(df.columns)
+    tree = ttk.Treeview(frm, show="headings")
     tree["columns"] = columns
-    for col in columns:
-        tree.heading(col, text=col)
-        tree.column(col, width=160, anchor="w")
-    # Заполняем строки (limit для памяти, можно убрать если нужно больше)
-    for idx, row in df.iterrows():
-        tree.insert("", "end", values=[str(row[col]) if pd.notna(row[col]) else "" for col in columns])
-        if idx > 999: break  # Показываем не более 1000 строк для скорости
-    # Добавляем scroll-бар
+
+    # Для чекбоксов со всеми уникальными значениями столбца:
+    col_filters = {col: set(df_full[col].dropna().unique().tolist()) for col in columns}
+
+    def show_frame(filtered_df):
+        # Сброс Treeview
+        for row in tree.get_children():
+            tree.delete(row)
+        for i, row in filtered_df.iterrows():
+            tree.insert("", "end", values=[str(row[c]) if pd.notna(row[c]) else "" for c in columns])
+
+    # Excel-стайл ФИЛЬТР для столбца
+    def open_filter_menu(col_idx):
+        col = columns[col_idx]
+        win = ctk.CTkToplevel(database_window)
+        win.title(f"Фильтр по: {col}")
+        win.geometry("350x450")
+        vals = sorted(list(set(df_full[col].dropna().unique().tolist())))
+        search_var = ctk.StringVar()
+        check_vars = [ctk.BooleanVar(value=(v in col_filters[col])) for v in vals]
+        def apply_filter():
+            selected = [v for v, vvar in zip(vals, check_vars) if vvar.get()]
+            col_filters[col] = set(selected)
+            filtered = df_full.copy()
+            for c, allowed in col_filters.items():
+                if allowed != set(df_full[c].dropna().unique().tolist()):
+                    filtered = filtered[filtered[c].isin(allowed)]
+            show_frame(filtered)
+            win.destroy()
+        def check_all():   # выбрать всё
+            for v in check_vars:
+                v.set(True)
+        def clear():       # снять всё
+            for v in check_vars:
+                v.set(False)
+        # UI
+        ctk.CTkLabel(win, text=f"Выберите значения для '{col}':").pack(anchor="w", pady=(6,4), padx=10)
+        entry = ctk.CTkEntry(win, textvariable=search_var); entry.pack(fill="x", padx=14, pady=2)
+        frame_checks = ctk.CTkFrame(win); frame_checks.pack(fill="both", expand=True, padx=10, pady=4)
+        checkboxes = []
+        def draw_checkboxes():
+            for w in checkboxes:
+                w.destroy()
+            checkboxes.clear()
+            value_query = search_var.get().lower()
+            for idx, v in enumerate(vals):
+                if value_query and value_query not in str(v).lower():
+                    continue
+                b = ctk.CTkCheckBox(frame_checks, text=str(v), variable=check_vars[idx])
+                b.pack(anchor="w")
+                checkboxes.append(b)
+        draw_checkboxes()
+        # Фильтровать чекбоксы по поиску
+        def on_search(*_):
+            draw_checkboxes()
+        search_var.trace_add("write", on_search)
+        btn_all = ctk.CTkButton(win, text="Все", command=check_all); btn_all.pack(side="left", padx=8, pady=7)
+        btn_none = ctk.CTkButton(win, text="Сброс", command=clear); btn_none.pack(side="left", padx=2)
+        btn_apply = ctk.CTkButton(win, text="Применить", command=apply_filter); btn_apply.pack(side="right", padx=15)
+    #
+        win.transient(database_window)
+        win.wait_visibility()
+        win.grab_set()
+
+    def reset_filters():
+        # Полное обновление всех фильтров (всё включено)
+        for c in columns:
+            col_filters[c] = set(df_full[c].dropna().unique().tolist())
+        show_frame(df_full)
+
+    # Настройка колонок Treeview и менюшка-фильтр
+    style = ttk.Style(tree)
+    style.theme_use("clam")
+    style.configure("Treeview.Heading", background="#1a1a1a", foreground="#d6d6d6", relief="flat")
+    for idx, col in enumerate(columns):
+        tree.heading(col, text=col, anchor="w",
+                     command=lambda col_idx=idx: open_filter_menu(col_idx))
+        tree.column(col, width=170, anchor="w")
+    tree.pack(fill="both", expand=True, side="left")
+    show_frame(df_full)
+
+    # Scrollbar
     vsb = ttk.Scrollbar(frm, orient="vertical", command=tree.yview)
     tree.configure(yscrollcommand=vsb.set)
     vsb.pack(side="right", fill="y")
-    tree.pack(fill="both", expand=True, side="left")
+
+    # Reset filters
+    btn_reset = ctk.CTkButton(database_window, text="Сбросить все фильтры", command=reset_filters)
+    btn_reset.pack(pady=8)
 
 root.mainloop()
