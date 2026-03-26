@@ -14,6 +14,7 @@ BLACK_DOMAINS = ["vk.com", "avito.ru", "avito.com", "hh.ru", "ok.ru", "youtube.c
 EXCEL_FILENAME = "contacts_database.xlsx"  # Файл с единой базой
 
 parser_stop_event = Event()
+parser_pause_event = Event()
 
 def run_parser(search_query, log_func, company_limit=None):
     import time, re, requests, urllib.parse
@@ -218,6 +219,15 @@ def run_parser(search_query, log_func, company_limit=None):
         if parser_stop_event.is_set():
             log_func("Операция остановлена оператором.")
             break
+
+        # Если пауза: держим поток, пока не снимут через кнопку
+        while parser_pause_event.is_set():
+            log_func("ПАРСЕР на паузе...")
+            time.sleep(1)
+            if parser_stop_event.is_set():
+                log_func("Операция остановлена оператором на паузе!")
+                return
+
         log_func(f"\n=== Парсим карточку {idx} ===\nСсылка: {link}")
         try:
             driver.get(link)
@@ -454,6 +464,12 @@ limit_entry.pack(anchor="w", pady=(0,18))
 
 btn_parse = ctk.CTkButton(frame, text="Начать парсинг", command=do_parse, width=200, height=42)
 btn_parse.pack(anchor="w", pady=(0,24))
+
+btn_pause = ctk.CTkButton(frame, text="Пауза", command=lambda: parser_pause_event.set(), width=140, fg_color="orange")
+btn_pause.pack(anchor="w", pady=(0,5))
+
+btn_resume = ctk.CTkButton(frame, text="Продолжить", command=lambda: parser_pause_event.clear(), width=140, fg_color="green")
+btn_resume.pack(anchor="w", pady=(0,14))
 
 btn_stop = ctk.CTkButton(frame, text="Остановить парсинг", command=lambda: parser_stop_event.set(), width=200, height=42, fg_color="red")
 btn_stop.pack(anchor="w", pady=(0, 14))
