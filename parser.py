@@ -10,7 +10,7 @@ from threading import Event
 
 BLACK_DOMAINS = [
     "vk.com", "avito.ru", "avito.com", "hh.ru", "ok.ru", "youtube.com", "facebook.com", "instagram.com",
-    "twitter.com", "t.me", "2gis.ru", ".yandex.", "ya.ru", "mail.ru", "rb.ru", "google.com", "zoon.ru", "google.ru"
+    "twitter.com", "t.me", "2gis.ru", ".yandex.", "ya.ru", "mail.ru", "rb.ru", "google.com", "zoon.ru", "orgpage.ru", "google.ru"
 ]
 MESSENGER_LINKS = ("wa.me/", "t.me/", "viber.me/", "viber://", "telegram.me/", "telegram.org/")
 
@@ -29,17 +29,20 @@ parser_stop_event = Event()
 parser_pause_event = Event()
 log_file = None
 
+def cut_to_main_yamaps_card(link):
+    # Регулярка оставляет только до /номер (не берёт /reviews, ?ll= и всё что дальше)
+    m = re.match(r"^(https://yandex\.[^/]+/maps/org/[^/]+/\d+)", link)
+    return m.group(1) if m else link.split("?")[0].split("/reviews")[0].split("/photos")[0].split("/gallery")[0]
+
 def is_valid_email(email):
     if not isinstance(email, str) or "@" not in email or email.count("@") != 1:
         return False
     if email.lower() in [x.lower() for x in FORBIDDEN_EMAILS]:
         return False
     username, domain = email.split("@", 1)
-    allowed_domains = (".ru", ".com", ".bk", ".net", ".org", ".by", ".ua")  # добавь что нужно
-    # Проверяет чтобы домен кончался только на допустимые
+    allowed_domains = (".ru", ".com", ".bk", ".net", ".org", ".by", ".ua")  # добавить что нужно
     if not any(domain.lower().endswith(ad) for ad in allowed_domains):
         return False
-    # После точки должны идти только буквы, а не цифры или 'ru3'
     tld = domain.rsplit('.', 1)[-1]
     if not tld.isalpha() or len(tld) < 2:
         return False
@@ -174,7 +177,6 @@ def run_parser(search_query, log_func, company_limit=None):
                 time.sleep(2.5)
                 r = requests.get(url, timeout=10, headers=headers)
                 text = r.text
-                # Валидные email + фильтр запрещённых емейлов!
                 emails = re.findall(r'[\w\.-]+@[\w\.-]+', text)
                 for e in emails:
                     e_low = e.lower()
@@ -211,7 +213,7 @@ def run_parser(search_query, log_func, company_limit=None):
     log_func("Прокрутите список компаний Яндекс.Карт до конца. Затем нажмите OK.")
     import tkinter.messagebox
     tkinter.messagebox.showinfo(
-        "Ручная прокрутка",
+        "Ручная Прокрутка",
         "Прокрутите список организаций в Яндекс.Картах до НИЗУ ВРУЧНУЮ (мышкой, колесиком или PageDown), "
         "чтобы ВСЕ компании появились на странице.\n\nПосле этого нажмите OK для запуска парсинга."
     )
@@ -246,7 +248,6 @@ def run_parser(search_query, log_func, company_limit=None):
         else:
             dupe_pairs.append((name, link))
 
-    # Мини-аналитика
     log_func("\n====== СТАТИСТИКА ПАРСИНГА ======")
     log_func(f"Уникальных компаний: {len(unique_pairs)}")
     log_func(f"Дубликатов (по имени): {len(dupe_pairs)}")
@@ -269,9 +270,11 @@ def run_parser(search_query, log_func, company_limit=None):
                 log_func("Операция остановлена оператором на паузе!")
                 return
 
-        log_func(f"\n=== Парсим карточку {idx} (уникальная) ===\nСсылка: {link}")
+        main_link = cut_to_main_yamaps_card(link)
+        log_func(f"\n=== Парсим карточку {idx} (уникальная) ===\nСсылка: {main_link}")
+
         try:
-            driver.get(link)
+            driver.get(main_link)
             time.sleep(4)
             phone, website, address, email, site_phones, occupation, ms_contacts = "","","","","","",""
             try:
