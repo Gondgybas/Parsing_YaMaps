@@ -287,6 +287,15 @@ def run_parser(search_query, log_func, company_limit=None):
             driver.get(link)
             time.sleep(2)
             try:
+                # Жмём на вкладку "Обзор" или "Главная" если есть
+                overview_xpath = "//button[contains(@class,'card-tabs-view__tab-button') and (normalize-space()='Обзор' or normalize-space()='Главная')]"
+                overview_btns = driver.find_elements(By.XPATH, overview_xpath)
+                if overview_btns:
+                    overview_btns[0].click()
+                    time.sleep(0.5)
+            except Exception:
+                pass
+            try:
                 name_card = driver.find_element(By.TAG_NAME, "h1").text
             except Exception:
                 name_card = name if name else ""
@@ -318,32 +327,10 @@ def run_parser(search_query, log_func, company_limit=None):
                 website = ""
             # АДРЕС и ДЕЯТЕЛЬНОСТЬ
             try:
-                all_divs = driver.find_elements(By.TAG_NAME, "div")
-                all_texts = []
-                for div in all_divs:
-                    try:
-                        txt = div.text.strip()
-                        if txt and len(txt) > 7:
-                            all_texts.append(txt)
-                    except Exception:
-                        pass
-                address = ""
-                for t in all_texts:
-                    if re.search(r"(Россия|г\.|ул\.|обл\.|д\.|микрорайон|проспект|\d{2,} ?[а-яА-ЯёЁ]+)", t) and \
-                        not t.lower().startswith('адрес'):
-                        address = t
-                        break
-                occupation = ""
-                for t in all_texts:
-                    lower = t.lower()
-                    if (("услуги" in lower or "работы" in lower or
-                        "деятельност" in lower or "металлообработка" in lower)
-                        and len(t) > 15):
-                        occupation = t
-                        break
+                address_elem = driver.find_element(By.CSS_SELECTOR, "a.business-contacts-view__address-link")
+                address = address_elem.text.strip()
             except Exception:
                 address = ""
-                occupation = ""
             # Сайт — если не найден пробуем найти в Яндексе
             site_phones = ""
             if not website and name_card:
