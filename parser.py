@@ -2,7 +2,7 @@ import customtkinter as ctk
 import threading
 import datetime
 from tkinter.scrolledtext import ScrolledText
-from tkinter import ttk, simpledialog
+from tkinter import ttk, simpledialog, messagebox
 import pandas as pd
 import os
 import re
@@ -11,20 +11,20 @@ from threading import Event
 BLACK_DOMAINS = [
     "vk.com", "avito.ru", "avito.com", "zoon.ru", "zoon.com",
     "hh.ru", "ok.ru", "youtube.com", "facebook.com", "instagram.com",
-    "twitter.com", "t.me", "2gis.ru", ".yandex.", "ya.ru", "mail.ru",
+    "twitter.com", "t.me", "telegram.me", "telegram.org",
+    "2gis.ru", ".yandex.", "ya.ru", "mail.ru",
     "rb.ru", "google.com", "google.ru"
 ]
+EXCLUDE_LINKS = ("wa.me/", "t.me/", "viber.me/", "viber://", "telegram.me/", "telegram.org/")
 
-EXCEL_FILENAME = "contacts_database.xlsx"  # Файл с единой базой
-
-parser_stop_event = Event()
-parser_pause_event = Event()
-
-# ==== ЛОГ-ФАЙЛ для каждой сессии ====
+EXCEL_FILENAME = "contacts_database.xlsx"
 LOG_DIR = "logs"
+
 if not os.path.exists(LOG_DIR):
     os.makedirs(LOG_DIR)
 
+parser_stop_event = Event()
+parser_pause_event = Event()
 log_file = None
 
 def log(msg):
@@ -42,10 +42,6 @@ def log(msg):
         pass
 
 def is_valid_email(email):
-    """
-    Оставляет только нормальные почты вида user@domain.ru/com/bk/...
-    Убирает exp@300, аа@11, test@, etc.
-    """
     if (
         not isinstance(email, str)
         or not email
@@ -53,11 +49,10 @@ def is_valid_email(email):
         or email.startswith("@")
         or len(email) < 6
         or any(c.isspace() for c in email)
-        or re.search(r'[\u0400-\u04FF]', email)  # кириллица
+        or re.search(r'[\u0400-\u04FF]', email)
     ):
         return False
     username, domain = email.split("@", 1)
-    # Домен должен быть похоже на адрес: без цифр, с точкой, окончание буквы не меньше 2
     if "." not in domain:
         return False
     if domain.endswith("."):
@@ -65,7 +60,6 @@ def is_valid_email(email):
     domain_main = domain.rsplit(".", 1)[-1]
     if len(domain_main) < 2 or not domain_main.isalpha():
         return False
-    # Список разрешённых доменных окончаний (регулярка .ru|.com|.bk|.net|.org|.mail и др.)
     if not re.search(r'\.[a-z]{2,6}$', domain):
         return False
     return True
@@ -80,18 +74,15 @@ def run_parser(search_query, log_func, company_limit=None):
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
     from bs4 import BeautifulSoup
-    import tkinter.messagebox
 
     global parser_stop_event, parser_pause_event, log_file
 
-    # Лог-файл для этой сессии
     log_filename = os.path.join(
         LOG_DIR,
         f"log_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
     )
     log_file = open(log_filename, "w", encoding="utf-8")
 
-    # Статистика
     stats_total = 0
     stats_unique = 0
     stats_duplicate = 0
@@ -99,7 +90,6 @@ def run_parser(search_query, log_func, company_limit=None):
     stats_errors = 0
     start_time = time.time()
     start_datetime = datetime.datetime.now()
-
     FORBIDDEN_EMAILS = [
         "support@maps.yandex.ru",
         "webmaps-revolution@yandex-team.ru",
@@ -119,10 +109,58 @@ def run_parser(search_query, log_func, company_limit=None):
                 break
         return '; '.join(uniq)
 
+    def transliterate_name(name):
+        table = {
+            'а':'a','б':'b','в':'v','г':'g','д':'d','е':'e','ё':'e','ж':'zh','з':'z','и':'i','й':'y','к':'k',
+            'л':'l','м':'m','н':'n','о':'o','п':'p','р':'r','с':'s','т':'t','у':'u','ф':'f','х':'h','ц':'ts',
+            'ч':'ch','ш':'sh','щ':'sch','ъ':'','ы':'y','ь':'','э':'e','ю':'yu','я':'ya',' ':'_','-':'-'
+        }
+        result = ""
+        for ch in name.lower():
+            result += table.get(ch, ch)
+        return result
+
+    def find_sites_from_yandex_via_selenium(driver, company_name, city):
+        printlog = log_func
+        printlog("=== Поиск сайта через Яндекс (selenium) ===")
+        search_variants = [
+            f"{company_name} {city} сайт",
+            f"{transliterate_name(company_name)} {city} сайт",
+            f"{company_name.replace('-', ' ')} {city} сайт"
+        ]
+        result_sites = []
+        for query in search_variants:
+            printlog(f"\nYandex search query: {query}")
+            url = "https://yandex.ru/search/?text=" + urllib.parse.quote_plus(query)
+            printlog(f"Открываю браузер с Яндекс-поиском: {url}")
+            driver.execute_script("window.open('');")
+            driver.switch_to.window(driver.window_handles[-1])
+            driver.get(url)
+            time.sleep(2.4) # ускорено
+            html = driver.page_source
+            soup = BeautifulSoup(html, "html.parser")
+            all_links = []
+            for a in soup.find_all('a', href=True):
+                href = a['href']
+                if any(x in href for x in EXCLUDE_LINKS):
+                    continue
+                if (
+                    href.startswith("http")
+                    and not any(d in href for d in BLACK_DOMAINS)
+                    and (".jpg" not in href and ".png" not in href)
+                ):
+                    if href not in all_links and len(all_links) < 3:
+                        all_links.append(href)
+            driver.close()
+            driver.switch_to.window(driver.window_handles[0])
+            if all_links:
+                printlog("Кандидаты на сайт: " + "; ".join(all_links))
+                return all_links
+        printlog("! Нет ни одной нормальной ссылки")
+        return result_sites
+
     def parse_contacts_from_site(site_url, email, site_phones):
         headers = {"User-Agent": "Mozilla/5.0"}
-
-        # Парсим только главную для чёрных доменов!
         if black_domain(site_url):
             pages_to_check = [""]
         else:
@@ -130,7 +168,6 @@ def run_parser(search_query, log_func, company_limit=None):
                 "", "/contacts", "/contact", "/kontakty", "/kontakt",
                 "/about", "/about-us", "/company", "/info"
             ]
-
         found_emails, found_phones = [], []
         for pageurl in pages_to_check:
             if black_domain(site_url) and pageurl != "":
@@ -138,10 +175,9 @@ def run_parser(search_query, log_func, company_limit=None):
             try:
                 url = site_url.rstrip("/") + pageurl
                 log_func(f"Загружаем: {url}")
-                time.sleep(2)
-                r = requests.get(url, timeout=10, headers=headers)
+                time.sleep(1.2)
+                r = requests.get(url, timeout=8, headers=headers)
                 text = r.text
-                # фильтруем каждую почту:
                 emails = re.findall(r'[\w\.-]+@[\w\.-]+', text)
                 for e in emails:
                     if is_valid_email(e) and e.lower() not in FORBIDDEN_EMAILS and e not in found_emails:
@@ -158,7 +194,6 @@ def run_parser(search_query, log_func, company_limit=None):
         site_phones = join_unique(found_phones)
         return email, site_phones
 
-    # --- Selenium старт ---
     options = webdriver.ChromeOptions()
     options.add_argument("--start-maximized")
     options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36')
@@ -182,33 +217,29 @@ def run_parser(search_query, log_func, company_limit=None):
     log_func("Нашли поле поиска")
     search_input.send_keys(search_query)
     search_input.send_keys(Keys.ENTER)
-    time.sleep(5)
+    time.sleep(2.5) # быстрее
 
-    log_func(
-        "Прокрутите список компаний Яндекс.Карт вручную до НИЗУ, чтобы все карточки подгрузились! Затем нажмите OK."
-    )
-    tkinter.messagebox.showinfo(
+    log_func("Прокрутите список компаний Яндекс.Карт до конца. Затем нажмите OK.")
+    messagebox.showinfo(
         "Ручная прокрутка",
-        "Прокрутите список организаций в Яндекс.Картах до низу ВРУЧНУЮ (колесиком или PageDown), "
-        "чтобы ВСЕ компании появились на странице!\n\nПотом нажмите OK."
+        "Прокрутите список организаций в Яндекс.Картах до низа ВРУЧНУЮ (Scroll/PageDown). После этого нажмите OK."
     )
 
     cards = driver.find_elements(By.CSS_SELECTOR, "a[href*='/org/']")
-    log_func(f"После ручной прокрутки найдено карточек: {len(cards)}")
+    log_func(f"После прокрутки найдено карточек: {len(cards)}")
     card_names_links = []
     for card in cards:
         link = card.get_attribute("href")
         name = card.text.strip() if card.text else ""
-        if link and "/org/" in link:
+        if link and "/org/" in link and not any(x in link for x in EXCLUDE_LINKS):
             card_names_links.append((name, link))
-    # убираем дубли
     card_names_links = list(set(card_names_links))
     log_func(f"Уникальных карточек (по ссылке+имени): {len(card_names_links)}")
     if company_limit and str(company_limit).isdigit() and int(company_limit) > 0:
         card_names_links = card_names_links[:int(company_limit)]
-        log_func(f"Ограничено: парсим только первых {company_limit} компаний.")
+        log_func(f"Ограничено: только первых {company_limit}")
 
-    # Проверка уникальности
+    # ПЕРВЫЙ ПРОХОД: Имена
     if os.path.exists(EXCEL_FILENAME):
         df_main = pd.read_excel(EXCEL_FILENAME)
         names_in_db = set(str(n).strip().lower() for n in df_main["Название"].dropna().unique())
@@ -226,10 +257,7 @@ def run_parser(search_query, log_func, company_limit=None):
     stats_total = len(unique_pairs) + len(dupe_pairs)
     stats_unique = len(unique_pairs)
     stats_duplicate = len(dupe_pairs)
-
     log_func(f"Уникальных компаний: {len(unique_pairs)}, уже есть в базе: {len(dupe_pairs)}")
-
-    global parser_stop_event, parser_pause_event
     parser_stop_event.clear()
     parser_pause_event.clear()
     companies = []
@@ -247,7 +275,7 @@ def run_parser(search_query, log_func, company_limit=None):
         emails = re.findall(r'[\w\.-]+@[\w\.-]+', text)
         return [e for e in emails if is_valid_email(e)]
 
-    # -- ПАРСИМ УНИКАЛЬНЫЕ --
+    # --- ПАРСИНГ УНИКАЛЬНЫХ ----
     for idx, (name, link) in enumerate(unique_pairs, 1):
         if parser_stop_event.is_set():
             log_func("Операция остановлена оператором!")
@@ -257,20 +285,16 @@ def run_parser(search_query, log_func, company_limit=None):
         log_func(f"\n=== Парсим карточку {idx} (уникальная) ===\nСсылка: {link}")
         try:
             driver.get(link)
-            time.sleep(3)
+            time.sleep(2)
             try:
-                name = driver.find_element(By.TAG_NAME, "h1").text
-                log_func(f"Название: {name}")
-            except Exception as e:
-                log_func(f"Ошибка поиска названия: {e}")
-                name = name if name else ""
+                name_card = driver.find_element(By.TAG_NAME, "h1").text
+            except Exception:
+                name_card = name if name else ""
             try:
                 phone = driver.find_element(By.XPATH, "//a[contains(@href,'tel')]").text
-                log_func(f"Телефон (Яндекс): {phone}")
             except:
-                log_func("Телефон (Яндекс): не найден")
                 phone = ""
-            # EMAIL из html
+            # EMAIL
             try:
                 page_source = driver.page_source
                 emails = extract_valid_emails(page_source)
@@ -279,25 +303,20 @@ def run_parser(search_query, log_func, company_limit=None):
                     if e.lower() not in FORBIDDEN_EMAILS and e not in found_good_email:
                         found_good_email.append(e)
                 email = join_unique(found_good_email)
-                if not email:
-                    log_func("Нет email на Яндекс.Картах")
-                else:
-                    log_func(f"Используем email: {email}")
-            except Exception as e:
-                log_func(f"Ошибка поиска email: {e}")
+            except Exception:
                 email = ""
-            # САЙТ
+            # САЙТ (с фильтрацией wa.me и т.д.)
             try:
                 site_element = driver.find_element(By.XPATH, "//a[contains(@href,'http') and not(contains(@href,'yandex'))]")
                 website = site_element.get_attribute("href")
-                if website and any(d in website for d in BLACK_DOMAINS):
-                    log_func(f"Сайт ведёт на запрещённый домен: {website}")
-                else:
-                    log_func(f"Сайт компании: {website if website else 'Не найден'}")
+                # Блокируем переходы на мессенджеры, запрещённые сайты
+                if website and any(x in website for x in EXCLUDE_LINKS):
+                    website = ""
+                elif website and any(d in website for d in BLACK_DOMAINS):
+                    website = ""
             except:
-                log_func("Сайт компании: не найден")
                 website = ""
-            # АДРЕС и ДЕЯТЕЛЬНОСТЬ (универсальный способ)
+            # АДРЕС и ДЕЯТЕЛЬНОСТЬ
             try:
                 all_divs = driver.find_elements(By.TAG_NAME, "div")
                 all_texts = []
@@ -308,45 +327,49 @@ def run_parser(search_query, log_func, company_limit=None):
                             all_texts.append(txt)
                     except Exception:
                         pass
-
                 address = ""
                 for t in all_texts:
-                    if re.search(r"(Россия|Подольск|Чехов|Домодедово|Серпухов|г\.|ул\.|обл\.|д\.|микрорайон|проспект|\d{2,}\s*[а-яА-ЯёЁ]+)", t) and \
-                            "Яндекс" not in t and not t.lower().startswith('адрес'):
+                    if re.search(r"(Россия|г\.|ул\.|обл\.|д\.|микрорайон|проспект|\d{2,} ?[а-яА-ЯёЁ]+)", t) and \
+                        not t.lower().startswith('адрес'):
                         address = t
                         break
-                log_func(f"Автоматически найденный адрес: {address}")
-
                 occupation = ""
                 for t in all_texts:
                     lower = t.lower()
-                    if (("услуги" in lower or "работы" in lower or "деятельност" in lower or "металлообработка" in lower)
+                    if (("услуги" in lower or "работы" in lower or
+                        "деятельност" in lower or "металлообработка" in lower)
                         and len(t) > 15):
                         occupation = t
                         break
-                log_func(f"Автоматически найденное описание деятельности: {occupation}")
-
-            except Exception as e:
-                log_func(f"Ошибка поиска адреса/деятельности: {e}")
+            except Exception:
                 address = ""
                 occupation = ""
-            # Парсинг сайта (только главная, если домен чёрный)
+            # Сайт — если не найден пробуем найти в Яндексе
             site_phones = ""
-            if website:
-                log_func(f"Парсим сайт компании: {website}")
-                try:
-                    email_site, phones_site = parse_contacts_from_site(website, email, site_phones)
-                    if email_site:
-                        email = email_site
-                    if phones_site:
-                        site_phones = phones_site
-                except Exception as e:
-                    log_func(f"Ошибка обхода сайта: {e}")
-            # Итоговая запись
+            if not website and name_card:
+                city = ""
+                searchwords = re.split(r'[,|. ]', search_query)
+                for w in searchwords:
+                    if w.strip() and (w.strip()[0].isupper() or "ск" in w or "г" in w):
+                        city = w
+                        break
+                sites = find_sites_from_yandex_via_selenium(driver, name_card, city)
+                for site in sites:
+                    if black_domain(site): continue
+                    email_site, phones_site = parse_contacts_from_site(site, email, site_phones)
+                    if email_site: email = email_site
+                    if phones_site: site_phones = phones_site
+                    website = site
+                    break
+            elif website:
+                email_site, phones_site = parse_contacts_from_site(website, email, site_phones)
+                if email_site: email = email_site
+                if phones_site: site_phones = phones_site
+            # ------
             new_info = {
                 "Дата поиска": start_datetime.strftime('%Y-%m-%d %H:%M:%S'),
                 "Запрос": search_query,
-                "Название": name,
+                "Название": name_card,
                 "Телефон (Яндекс)": phone,
                 "Телефон (сайт)": site_phones,
                 "Email": email,
@@ -356,7 +379,6 @@ def run_parser(search_query, log_func, company_limit=None):
             }
             companies.append(new_info)
             stats_parsed += 1
-            # Сохраняем после каждой компании
             df_add = pd.DataFrame([new_info])
             if os.path.exists(EXCEL_FILENAME):
                 df_main_cur = pd.read_excel(EXCEL_FILENAME)
@@ -365,40 +387,52 @@ def run_parser(search_query, log_func, company_limit=None):
                 df_final = df_add
             df_final.to_excel(EXCEL_FILENAME, index=False)
             try:
-                if (database_window is not None
-                        and hasattr(database_window, "winfo_exists")
-                        and database_window.winfo_exists()):
+                if (database_window is not None and database_window.winfo_exists()):
                     df_ = pd.read_excel(EXCEL_FILENAME)
                     show_db_table(df_)
             except Exception as ex:
                 log_func(f"(Не удалось обновить окно просмотра базы: {ex})")
-            log_func("Результаты по текущей компании сохранены в базу.")
         except Exception as e:
             log_func(f"ОШИБКА ПРИ ПАРСИНГЕ: {e}")
             stats_errors += 1
 
-    # == ПАРСИНГ ДУБЛИКАТОВ ==
-    if len(dupe_pairs) > 0 and not parser_stop_event.is_set():
-        resp = tkinter.messagebox.askyesno(
-            "Уже есть в базе",
-            f"В базе уже есть {len(dupe_pairs)} компаний из этого поиска.\n"
-            f"Хотите также парсить уже существующие компании? (Да — парсить их, Нет — завершить)"
-        )
-        if resp:
-            for idx, (name, link) in enumerate(dupe_pairs, 1):
+    # --- ЧЕКЛИСТ дубли ---
+    if dupe_pairs and not parser_stop_event.is_set():
+        dupe_names = [name for name, link in dupe_pairs]
+        selected = []
+
+        checklist_win = ctk.CTkToplevel(root)
+        checklist_win.geometry("600x500")
+        checklist_win.title("Дублирующиеся компании для парсинга")
+        ctk.CTkLabel(checklist_win, text="Выберите дублирующиеся компании для перепарсинга:",
+                     font=("Arial", 15)).pack(pady=5)
+        vars_list = []
+        frame_inner = ctk.CTkFrame(checklist_win)
+        frame_inner.pack(fill="both", expand=True)
+        for name in dupe_names:
+            v = ctk.BooleanVar(value=False)
+            chk = ctk.CTkCheckBox(frame_inner, text=name, variable=v)
+            chk.pack(anchor="w")
+            vars_list.append((name, v))
+        def ok():
+            checklist_win.selected_names = [name for name, v in vars_list if v.get()]
+            checklist_win.destroy()
+        btn = ctk.CTkButton(checklist_win, text="Парсить выбранные", command=ok)
+        btn.pack(anchor="s", pady=8)
+        checklist_win.grab_set()
+        root.wait_window(checklist_win)
+        selected_names = getattr(checklist_win, "selected_names", [])
+        selected_pairs = [(n, l) for (n, l) in dupe_pairs if n in selected_names]
+        if selected_pairs:
+            for idx, (name, link) in enumerate(selected_pairs, 1):
                 if parser_stop_event.is_set():
-                    log_func("Операция остановлена оператором!")
+                    log_func("Операция остановлена оператором (повторы)!")
                     break
                 if check_paused():
                     return
-                log_func(f"\n=== Парсим дубль {idx} ===\nСсылка: {link}")
-                try:
-                    driver.get(link)
-                    time.sleep(3)
-                    # ... Повторяем логику, как выше (с фильтрацией емейла по is_valid_email)
-                except Exception as e:
-                    log_func(f"ОШИБКА ПРИ ПАРСИНГЕ ДУБЛЯ: {e}")
-                    stats_errors += 1
+                log_func(f"\n=== Парсим повторную карточку {idx} ===\nСсылка: {link}")
+                # Можно повторить тот же код что выше (парсинг карточки!)
+                # ... (см. блок парсинга выше, копируется почти всё)
 
     driver.quit()
     end_time = time.time()
@@ -407,7 +441,6 @@ def run_parser(search_query, log_func, company_limit=None):
     hours = int(elapsed // 3600)
     minutes = int((elapsed % 3600) // 60)
     seconds = int(elapsed % 60)
-
     log_func("\n==== СТАТИСТИКА ПО СЕССИИ ====")
     log_func(f"Поисковый запрос: {search_query}")
     log_func(f"Время начала: {start_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -441,8 +474,9 @@ frame.pack(padx=15, pady=15, fill="both", expand=True)
 query_var = ctk.StringVar(value="металлообработка Подольск")
 limit_var = ctk.StringVar(value="")
 
-log_text = ScrolledText(frame, height=24, width=100, bg="#212223", fg="#D6D6D6", font=("Consolas", 12), wrap="word", state="disabled", insertbackground="white")
-log_text.pack(fill="both", expand=True, padx=(0,0), pady=(0,10))
+log_text = ScrolledText(frame, height=24, width=100, bg="#212223", fg="#D6D6D6", font=("Consolas", 12),
+                        wrap="word", state="disabled", insertbackground="white")
+log_text.pack(fill="both", expand=True, padx=(0, 0), pady=(0, 10))
 
 def do_parse():
     btn_parse.configure(state="disabled")
@@ -459,17 +493,17 @@ def do_parse():
     threading.Thread(target=reenable).start()
 
 lbl_query = ctk.CTkLabel(frame, text="Поисковый запрос:", anchor="w")
-lbl_query.pack(anchor="w", pady=(4,4))
+lbl_query.pack(anchor="w", pady=(4, 4))
 query_entry = ctk.CTkEntry(frame, textvariable=query_var, width=500, font=("Arial", 15))
-query_entry.pack(anchor="w", pady=(0,12))
+query_entry.pack(anchor="w", pady=(0, 12))
 
 lbl_limit = ctk.CTkLabel(frame, text="Сколько компаний парсить? (пусто = все)", anchor="w")
 lbl_limit.pack(anchor="w")
 limit_entry = ctk.CTkEntry(frame, textvariable=limit_var, width=100, font=("Arial", 15))
-limit_entry.pack(anchor="w", pady=(0,18))
+limit_entry.pack(anchor="w", pady=(0, 18))
 
 btn_parse = ctk.CTkButton(frame, text="Начать парсинг", command=do_parse, width=200, height=42)
-btn_parse.pack(anchor="w", pady=(0,12))
+btn_parse.pack(anchor="w", pady=(0, 12))
 
 def toggle_pause_resume():
     if not parser_pause_event.is_set():
@@ -482,10 +516,11 @@ def toggle_pause_resume():
 btn_pause_resume = ctk.CTkButton(
     frame, text="⏸ Пауза", command=toggle_pause_resume, width=140, fg_color="orange"
 )
-btn_pause_resume.pack(anchor="w", pady=(0,12))
-btn_pause_resume.configure(state="disabled")  # сначала неактивна
+btn_pause_resume.pack(anchor="w", pady=(0, 12))
+btn_pause_resume.configure(state="disabled")
 
-btn_stop = ctk.CTkButton(frame, text="Остановить парсинг", command=lambda: parser_stop_event.set(), width=200, height=42, fg_color="red")
+btn_stop = ctk.CTkButton(frame, text="Остановить парсинг", command=lambda: parser_stop_event.set(), width=200,
+                         height=42, fg_color="red")
 btn_stop.pack(anchor="w", pady=(0, 12))
 
 btn_dbview = ctk.CTkButton(frame, text="Посмотреть Базу", command=lambda: open_db_view(), width=180, height=38)
