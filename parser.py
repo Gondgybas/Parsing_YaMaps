@@ -260,10 +260,44 @@ def run_parser(search_query, log_func, company_limit=None):
                 log_func("Сайт компании: не найден")
                 website = ""
             try:
-                address = driver.find_element(By.XPATH, "//div[contains(text(),'Адрес')]").text
-                log_func(f"Адрес: {address}")
-            except:
-                log_func("Адрес: не найден")
+                import re
+                # Собираем все div с текстом
+                all_divs = driver.find_elements(By.TAG_NAME, "div")
+                all_texts = []
+                for div in all_divs:
+                    try:
+                        txt = div.text.strip()
+                        if txt and len(txt) > 7:
+                            all_texts.append(txt)
+                    except Exception:
+                        pass
+
+                # АДРЕС — ищем первую строку, похожую на адрес
+                address = ""
+                for t in all_texts:
+                    # ищем ключевые слова + не просто "Адрес"
+                    if re.search(r"(Россия|Подольск|Чехов|Домодедово|Серпухов|г\.|ул\.|обл\.|д\.|микрорайон|проспект|\d{2,}\s*[а-яА-ЯёЁ]+)",
+                                 t) and \
+                            "Яндекс" not in t and not t.lower().startswith('адрес'):
+                        address = t
+                        break
+                log_func(f"Автоматически найденный адрес: {address}")
+
+                # ДЕЯТЕЛЬНОСТЬ — ищем длинную строку со словами "услуги", "работы" или "металлообработка"
+                occupation = ""
+                for t in all_texts:
+                    lower = t.lower()
+                    if ((
+                            "услуги" in lower or "работы" in lower or "деятельност" in lower or "металлообработка" in lower)
+                            and len(t) > 15):
+                        occupation = t
+                        break
+                log_func(f"Автоматически найденное описание деятельности: {occupation}")
+
+            except Exception as e:
+                log_func(f"Ошибка поиска адреса/деятельности: {e}")
+                address = ""
+                occupation = ""
             if website:
                 log_func(f"Парсим сайт компании: {website}")
                 try:
@@ -315,7 +349,8 @@ def run_parser(search_query, log_func, company_limit=None):
                 "Телефон (сайт)": site_phones,
                 "Email": email,
                 "Сайт": website,
-                "Адрес": address
+                "Адрес": address,
+                "Описание деятельности": occupation
             }
             dup = check_duplicate(new_info)
             if dup:
@@ -420,11 +455,11 @@ limit_entry.pack(anchor="w", pady=(0,18))
 btn_parse = ctk.CTkButton(frame, text="Начать парсинг", command=do_parse, width=200, height=42)
 btn_parse.pack(anchor="w", pady=(0,24))
 
-btn_dbview = ctk.CTkButton(frame, text="Посмотреть Базу", command=lambda: open_db_view(), width=180, height=38)
-btn_dbview.pack(anchor="w", pady=(0,14))
-
 btn_stop = ctk.CTkButton(frame, text="Остановить парсинг", command=lambda: parser_stop_event.set(), width=200, height=42, fg_color="red")
 btn_stop.pack(anchor="w", pady=(0, 14))
+
+btn_dbview = ctk.CTkButton(frame, text="Посмотреть Базу", command=lambda: open_db_view(), width=180, height=38)
+btn_dbview.pack(anchor="w", pady=(0,14))
 
 lbl_log = ctk.CTkLabel(frame, text="Сообщения отладки / ход работы:")
 lbl_log.pack(anchor="w", pady=(0,5))
