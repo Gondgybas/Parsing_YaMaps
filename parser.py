@@ -380,7 +380,7 @@ ctk.set_default_color_theme("dark-blue")
 
 root = ctk.CTk()
 database_window = None
-root.title("Яндекс-Карты КонтактПарсер - Единая База")
+root.title("Яндекс-Карты КонтактПарсер")
 
 root.geometry("950x700")
 frame = ctk.CTkFrame(root)
