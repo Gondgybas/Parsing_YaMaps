@@ -170,6 +170,8 @@ def run_parser(search_query, log_func, company_limit=None):
                     p = p.strip()
                     if p not in found_phones:
                         found_phones.append(p)
+                if found_emails:
+                    break  # Уже нашли email — больше не лезем
             except Exception as e:
                 log_func(f"Ошибка запроса: {e}")
                 continue
@@ -182,7 +184,7 @@ def run_parser(search_query, log_func, company_limit=None):
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
     wait = WebDriverWait(driver, 10)
     driver.get("https://yandex.ru/maps")
-    log_func("Открыт Яндекс.Карты")
+    log_func("Отк��ыт Яндекс.Карты")
     search_input = wait.until(EC.presence_of_element_located((By.TAG_NAME, "input")))
     log_func("Нашли поле поиска")
     search_input.send_keys(search_query)
@@ -198,7 +200,7 @@ def run_parser(search_query, log_func, company_limit=None):
     )
 
     cards = driver.find_elements(By.CSS_SELECTOR, "a[href*='/org/']")
-    log_func(f"После прокрутки найдено карточек: {len(cards)}")
+    log_func(f"После прокрутки найдено карт��чек: {len(cards)}")
 
     all_links, all_names = [], []
     for card in cards:
@@ -289,6 +291,10 @@ def run_parser(search_query, log_func, company_limit=None):
             except Exception as e:
                 occupation = ""
                 log_func("Ошибка поиска деятельности!")
+
+            # ======== Ищем email по приоритету ==========
+
+            # 1. email на Яндекс.Картах
             try:
                 page_source = driver.page_source
                 emails = re.findall(r'[\w\.-]+@[\w\.-]+', page_source)
@@ -298,45 +304,60 @@ def run_parser(search_query, log_func, company_limit=None):
                     if is_valid_email(e) and e_low not in [x.lower() for x in FORBIDDEN_EMAILS] and e not in found_good_email:
                         found_good_email.append(e)
                 email = join_unique(found_good_email)
-                if not email:
-                    log_func("Нет email на Яндекс.Картах")
+                if email:
+                    log_func(f"Нашли email на Я.Картах: {email}")
                 else:
-                    log_func(f"Используем email: {email}")
+                    log_func(f"Email на Яндекс.Картах не найден.")
             except Exception as e:
                 log_func(f"Ошибка поиска email: {e}")
-            try:
-                site_element = driver.find_element(By.XPATH, "//a[contains(@href,'http') and not(contains(@href,'yandex'))]")
-                website = site_element.get_attribute("href")
-                if website and (any(x in website for x in MESSENGER_LINKS) or black_domain(website)):
-                    log_func(f"Сайт исключён или мессенджер (или из исключённого списка), парсим только корень: {website}")
-                    pass
-                else:
-                    log_func(f"Сайт компании: {website if website else 'Не найден'}")
-            except:
-                website = ""
-            if website:
-                log_func(f"Парсим сайт компании: {website}")
+
+            # 2. Если не нашли, ищем на сайте с Я.Карт
+            if not email:
                 try:
-                    email_site, phones_site = parse_contacts_from_site(website)
-                    if email_site: email = email_site
-                    if phones_site: site_phones = phones_site
-                except Exception as e:
-                    log_func(f"Ошибка обхода сайта: {e}")
-            else:
-                log_func("Сайт не найден, ищем через Яндекс...")
+                    site_element = driver.find_element(By.XPATH, "//a[contains(@href,'http') and not(contains(@href,'yandex'))]")
+                    website = site_element.get_attribute("href")
+                    if website and (any(x in website for x in MESSENGER_LINKS) or black_domain(website)):
+                        log_func(f"Сайт исключён (или мессенджер/черный), пропускаем.")
+                        website = ""
+                    else:
+                        log_func(f"Пробуем парсить email с сайта с Я.Карт: {website}")
+                except:
+                    website = ""
+                if website:
+                    try:
+                        email_site, phones_site = parse_contacts_from_site(website)
+                        if email_site:
+                            email = email_site
+                            site_phones = phones_site
+                            log_func(f"Нашли email на сайте: {email_site}")
+                        elif phones_site:
+                            site_phones = phones_site
+                    except Exception as e:
+                        log_func(f"Ошибка обхода сайта: {e}")
+
+            # 3. Если всё ещё нет email — ищем через Яндекс Поиск (top 3, по очереди)
+            if not email:
+                log_func("Ищем по top-3 сайтов из Яндекс.Поиска...")
                 found_sites = find_sites_from_yandex_via_selenium(driver, name, search_query.split()[-1])
                 if found_sites:
-                    for site in found_sites:
+                    for i, site in enumerate(found_sites, 1):
                         if any(x in site for x in MESSENGER_LINKS) or black_domain(site):
                             log_func(f"Пропущена ссылка-исключение: {site}")
                             continue
-                        log_func(f"Пробуем сайт из Яндекса: {site}")
-                        email_candidate, phone_candidate = parse_contacts_from_site(site)
-                        if email_candidate: email = email_candidate; website = site
-                        if phone_candidate and not site_phones: site_phones = phone_candidate
-                        if email_candidate: break
+                        log_func(f"Пробуем сайт #{i} из поиска: {site}")
+                        try:
+                            email_candidate, phone_candidate = parse_contacts_from_site(site)
+                            if email_candidate:
+                                email = email_candidate
+                                website = site
+                                log_func(f"Найден email на сайте #{i}: {email}")
+                                break
+                            if phone_candidate and not site_phones:
+                                site_phones = phone_candidate
+                        except Exception as e:
+                            log_func(f"Ошибка парсинга сайта: {e}")
                     if not email:
-                        log_func("Не удалось найти email на первых 3 сайтах Яндекса")
+                        log_func("Не удалось найти email на первых 3 сайтах Яндекса.")
                 else:
                     log_func("Не найден ни один сайт через Яндекс. Пропускаем.")
 
