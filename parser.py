@@ -30,7 +30,6 @@ parser_pause_event = Event()
 log_file = None
 
 def cut_to_main_yamaps_card(link):
-    # Регулярка оставляет только до /номер (не берёт /reviews, ?ll= и всё что дальше)
     m = re.match(r"^(https://yandex\.[^/]+/maps/org/[^/]+/\d+)", link)
     return m.group(1) if m else link.split("?")[0].split("/reviews")[0].split("/photos")[0].split("/gallery")[0]
 
@@ -40,29 +39,13 @@ def is_valid_email(email):
     if email.lower() in [x.lower() for x in FORBIDDEN_EMAILS]:
         return False
     username, domain = email.split("@", 1)
-    allowed_domains = (".ru", ".com", ".bk", ".net", ".org", ".by", ".ua")  # добавить что нужно
+    allowed_domains = (".ru", ".com", ".bk", ".net", ".org", ".by", ".ua")
     if not any(domain.lower().endswith(ad) for ad in allowed_domains):
         return False
     tld = domain.rsplit('.', 1)[-1]
     if not tld.isalpha() or len(tld) < 2:
         return False
     return True
-
-def extract_messenger_contacts(text):
-    messengers = []
-    whatsapps = re.findall(r"https?://wa\.me/(\d+)", text)
-    for m in whatsapps:
-        messengers.append(f"WhatsApp: +{m}")
-    teles = re.findall(r"https?://t\.me/([\w\._]+)", text)
-    for m in teles:
-        messengers.append(f"Telegram: {m}")
-    vibers = re.findall(r"https?://viber\.me/([^\s/]+)", text)
-    for m in vibers:
-        messengers.append(f"Viber: {m}")
-    telegrams = re.findall(r"https?://(?:telegram\.me|telegram\.org)/([\w\._]+)", text)
-    for m in telegrams:
-        messengers.append(f"Telegram: {m}")
-    return "; ".join(messengers)
 
 def log(msg):
     global log_file
@@ -167,10 +150,10 @@ def run_parser(search_query, log_func, company_limit=None):
             pages_to_check = [
                 "", "/contacts", "/contact", "/kontakty", "/kontakt", "/about", "/about-us", "/company", "/info"
             ]
-        found_emails, found_phones, found_messengers = [], [], []
+        found_emails, found_phones = [], []
         for pageurl in pages_to_check:
             if black_domain(site_url) and pageurl != "":
-                continue  # ТОЛЬКО главная у исключений!
+                continue
             try:
                 url = site_url.rstrip("/") + pageurl
                 log_func(f"Загружаем: {url}")
@@ -187,16 +170,12 @@ def run_parser(search_query, log_func, company_limit=None):
                     p = p.strip()
                     if p not in found_phones:
                         found_phones.append(p)
-                ms = extract_messenger_contacts(text)
-                if ms:
-                    found_messengers.append(ms)
             except Exception as e:
                 log_func(f"Ошибка запроса: {e}")
                 continue
         email = join_unique(found_emails)
         site_phones = join_unique(found_phones)
-        messenger_contacts = "; ".join(found_messengers)
-        return email, site_phones, messenger_contacts
+        return email, site_phones
 
     options = webdriver.ChromeOptions()
     options.add_argument("--start-maximized")
@@ -276,7 +255,8 @@ def run_parser(search_query, log_func, company_limit=None):
         try:
             driver.get(main_link)
             time.sleep(4)
-            phone, website, address, email, site_phones, occupation, ms_contacts = "","","","","","",""
+            phone, website, address, email, site_phones, occupation = "","","","","",""
+            soup = BeautifulSoup(driver.page_source, "html.parser")
             try:
                 name = driver.find_element(By.TAG_NAME, "h1").text
                 log_func(f"Название: {name}")
@@ -287,6 +267,28 @@ def run_parser(search_query, log_func, company_limit=None):
                 log_func(f"Телефон (Яндекс): {phone}")
             except:
                 log_func("Телефон (Яндекс): не найден")
+            # Чистый адрес с a.business-contacts-view__address-link
+            try:
+                address_elem = soup.find("a", class_="business-contacts-view__address-link")
+                address = address_elem.text.strip() if address_elem else ""
+                log_func(f"Актуальный адрес: {address}")
+            except Exception as e:
+                address = ""
+                log_func("Не найден адрес!")
+            # Описание деятельности по категориям
+            try:
+                occupation_items = []
+                cats_div = soup.find("div", class_="orgpage-categories-info-view")
+                if cats_div:
+                    for span in cats_div.find_all("span", class_="button__text"):
+                        txt = span.get_text(strip=True)
+                        if txt and txt not in occupation_items:
+                            occupation_items.append(txt)
+                occupation = "; ".join(occupation_items)
+                log_func(f"Актуальные виды деятельности: {occupation}")
+            except Exception as e:
+                occupation = ""
+                log_func("Ошибка поиска деятельности!")
             try:
                 page_source = driver.page_source
                 emails = re.findall(r'[\w\.-]+@[\w\.-]+', page_source)
@@ -296,15 +298,12 @@ def run_parser(search_query, log_func, company_limit=None):
                     if is_valid_email(e) and e_low not in [x.lower() for x in FORBIDDEN_EMAILS] and e not in found_good_email:
                         found_good_email.append(e)
                 email = join_unique(found_good_email)
-                ms_contacts = extract_messenger_contacts(page_source)
                 if not email:
                     log_func("Нет email на Яндекс.Картах")
                 else:
                     log_func(f"Используем email: {email}")
-                if ms_contacts:
-                    log_func(f"Messenger контакты: {ms_contacts}")
             except Exception as e:
-                log_func(f"Ошибка поиска email/messenger: {e}")
+                log_func(f"Ошибка поиска email: {e}")
             try:
                 site_element = driver.find_element(By.XPATH, "//a[contains(@href,'http') and not(contains(@href,'yandex'))]")
                 website = site_element.get_attribute("href")
@@ -315,35 +314,12 @@ def run_parser(search_query, log_func, company_limit=None):
                     log_func(f"Сайт компании: {website if website else 'Не найден'}")
             except:
                 website = ""
-            try:
-                all_divs = driver.find_elements(By.TAG_NAME, "div")
-                all_texts = []
-                for div in all_divs:
-                    try:
-                        txt = div.text.strip()
-                        if txt and len(txt) > 7:
-                            all_texts.append(txt)
-                    except Exception:
-                        pass
-                address = ""
-                for t in all_texts:
-                    if re.search(r"(Россия|г\.|ул\.|обл\.|д\.|микрорайон|проспект|\d{2,}\s*[а-яА-ЯёЁ]+)", t) and "Яндекс" not in t and not t.lower().startswith('адрес'):
-                        address = t; break
-                occupation = ""
-                for t in all_texts:
-                    lower = t.lower()
-                    if (("услуги" in lower or "работы" in lower or "деятельност" in lower or "металлообработка" in lower) and len(t) > 15):
-                        occupation = t; break
-            except Exception as e:
-                address = ""
-                occupation = ""
             if website:
                 log_func(f"Парсим сайт компании: {website}")
                 try:
-                    email_site, phones_site, site_messengers = parse_contacts_from_site(website)
+                    email_site, phones_site = parse_contacts_from_site(website)
                     if email_site: email = email_site
                     if phones_site: site_phones = phones_site
-                    if site_messengers: ms_contacts += (f"; {site_messengers}" if ms_contacts and site_messengers else site_messengers)
                 except Exception as e:
                     log_func(f"Ошибка обхода сайта: {e}")
             else:
@@ -355,10 +331,9 @@ def run_parser(search_query, log_func, company_limit=None):
                             log_func(f"Пропущена ссылка-исключение: {site}")
                             continue
                         log_func(f"Пробуем сайт из Яндекса: {site}")
-                        email_candidate, phone_candidate, messenger_candidate = parse_contacts_from_site(site)
+                        email_candidate, phone_candidate = parse_contacts_from_site(site)
                         if email_candidate: email = email_candidate; website = site
                         if phone_candidate and not site_phones: site_phones = phone_candidate
-                        if messenger_candidate: ms_contacts += (f"; {messenger_candidate}" if ms_contacts and messenger_candidate else messenger_candidate)
                         if email_candidate: break
                     if not email:
                         log_func("Не удалось найти email на первых 3 сайтах Яндекса")
@@ -374,9 +349,9 @@ def run_parser(search_query, log_func, company_limit=None):
                 "Email": email,
                 "Сайт": website,
                 "Адрес": address,
-                "Описание деятельности": occupation,
-                "Messenger контакты": ms_contacts.strip("; ")
+                "Описание деятельности": occupation
             }
+
             companies.append(new_info)
 
             if len(companies) > 0:
@@ -397,7 +372,7 @@ def run_parser(search_query, log_func, company_limit=None):
                             pass
                 except Exception as ex:
                     log_func(f"(Не удалось обновить окно просмотра базы: {ex})")
-            log_func(f"--- Итог по карточке ---\nEmail: {email}\nТелефон (Яндекс): {phone}\nТелефон (сайт): {site_phones}\nСайт: {website}\nАдрес: {address}\nMessengers: {ms_contacts}")
+            log_func(f"--- Итог по карточке ---\nEmail: {email}\nТелефон (Яндекс): {phone}\nТелефон (сайт): {site_phones}\nСайт: {website}\nАдрес: {address}\nОписание: {occupation}")
         except Exception as e:
             log_func(f"ОШИБКА ГЛАВНОГО ЦИКЛА: {e}")
 
