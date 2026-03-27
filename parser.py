@@ -13,7 +13,8 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 BLACK_DOMAINS = [
     "vk.com", "avito.ru", "avito.com", "hh.ru", "ok.ru", "youtube.com", "facebook.com", "instagram.com",
     "twitter.com", "t.me", "2gis.ru", ".yandex.", "ya.ru", "mail.ru", "rb.ru", "google.com", "zoon.ru", "orgpage.ru",
-    "google.ru", "yandex.ru/maps", "rusprofile.ru", ".clients.site", "Avito.ru", ".orgsinfo.ru", ".jsprav.ru"
+    "google.ru", "yandex.ru/maps", "rusprofile.ru", ".clients.site", "Avito.ru", ".orgsinfo.ru", ".jsprav.ru",
+    "yandex.ru/profile", "ruscatalog.org"
 ]
 MESSENGER_LINKS = ("wa.me/", "t.me/", "viber.me/", "viber://", "telegram.me/", "telegram.org/")
 
@@ -87,6 +88,15 @@ def run_parser(search_query, log_func, company_limit=None):
         df_main = pd.read_excel(EXCEL_FILENAME)
     else:
         df_main = pd.DataFrame()
+
+    # build lookup for (name, address) -> email
+    base_index = {}
+    if not df_main.empty and "Название" in df_main.columns and "Адрес" in df_main.columns:
+        for _, row in df_main.iterrows():
+            n = str(row.get("Название", "")).strip().lower()
+            a = str(row.get("Адрес", "")).strip().lower()
+            e = str(row.get("Email", "")).strip()
+            base_index[(n, a)] = e
 
     now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
@@ -260,6 +270,27 @@ def run_parser(search_query, log_func, company_limit=None):
         try:
             driver.get(main_link)
             time.sleep(4)
+            # Вытаскиваем фактическое имя и адрес
+            try:
+                actual_name = driver.find_element(By.TAG_NAME, "h1").text.strip().lower()
+            except Exception as e:
+                actual_name = ""
+            import bs4
+            soup = bs4.BeautifulSoup(driver.page_source, "html.parser")
+            try:
+                address_elem = soup.find("a", class_="business-contacts-view__address-link")
+                actual_address = address_elem.text.strip().lower() if address_elem else ""
+            except Exception as e:
+                actual_address = ""
+            key = (actual_name, actual_address)
+            email_in_base = base_index.get(key, "")
+            if key in base_index and email_in_base:
+                log_func(f"Пропущено (уже был email): '{actual_name}' / '{actual_address}'")
+                continue
+            elif key in base_index:
+                log_func(f"Парсим повторно (был дубль без email): '{actual_name}' / '{actual_address}'")
+            else:
+                log_func(f"Новая компания: '{actual_name}' / '{actual_address}'")
             phone, website, address, email, site_phones, occupation = "","","","","",""
             soup = BeautifulSoup(driver.page_source, "html.parser")
             try:
@@ -375,12 +406,12 @@ def run_parser(search_query, log_func, company_limit=None):
             new_info = {
                 "Дата поиска": now_str,
                 "Запрос": search_query,
-                "Название": name,
+                "Название": actual_name,
                 "Телефон (Яндекс)": phone,
                 "Телефон (сайт)": site_phones,
                 "Email": email,
                 "Сайт": website,
-                "Адрес": address,
+                "Адрес": actual_address,
                 "Описание деятельности": occupation
             }
 
