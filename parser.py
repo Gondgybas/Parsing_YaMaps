@@ -7,10 +7,13 @@ import pandas as pd
 import os
 import re
 from threading import Event
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 BLACK_DOMAINS = [
     "vk.com", "avito.ru", "avito.com", "hh.ru", "ok.ru", "youtube.com", "facebook.com", "instagram.com",
-    "twitter.com", "t.me", "2gis.ru", ".yandex.", "ya.ru", "mail.ru", "rb.ru", "google.com", "zoon.ru", "orgpage.ru", "google.ru"
+    "twitter.com", "t.me", "2gis.ru", ".yandex.", "ya.ru", "mail.ru", "rb.ru", "google.com", "zoon.ru", "orgpage.ru",
+    "google.ru", "yandex.ru/maps", "rusprofile.ru", ".clients.site", "Avito.ru", ".orgsinfo.ru", ".jsprav.ru"
 ]
 MESSENGER_LINKS = ("wa.me/", "t.me/", "viber.me/", "viber://", "telegram.me/", "telegram.org/")
 
@@ -148,7 +151,7 @@ def run_parser(search_query, log_func, company_limit=None):
             pages_to_check = [""]
         else:
             pages_to_check = [
-                "", "/contacts", "/contact", "/kontakty", "/kontakt", "/about", "/about-us", "/company", "/info"
+                "", "/contacts", "/contact", "/kontakty", "/kontakt", "/about", "/about-us", "/company", "/info", "/contact-us"
             ]
         found_emails, found_phones = [], []
         for pageurl in pages_to_check:
@@ -158,7 +161,7 @@ def run_parser(search_query, log_func, company_limit=None):
                 url = site_url.rstrip("/") + pageurl
                 log_func(f"Загружаем: {url}")
                 time.sleep(2.5)
-                r = requests.get(url, timeout=10, headers=headers)
+                r = requests.get(url, timeout=10, headers=headers, verify=False)
                 text = r.text
                 emails = re.findall(r'[\w\.-]+@[\w\.-]+', text)
                 for e in emails:
