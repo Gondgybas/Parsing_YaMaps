@@ -90,12 +90,16 @@ def run_parser(search_query, log_func, company_limit=None):
         df_main = pd.DataFrame()
 
     # ------ Индекс по (название, адрес, сайт ЯК) ------
+    def normalize_site(site_url):
+        s = (site_url or '').replace("https://", "").replace("http://", "").replace("www.", "").strip().rstrip('/')
+        return s.lower()
+
     tri_index = set()
     if not df_main.empty and "Название" in df_main.columns and "Адрес" in df_main.columns and "Сайт ЯндексКарты" in df_main.columns:
         for _, row in df_main.iterrows():
             n = str(row.get("Название", "")).strip().lower()
             a = str(row.get("Адрес", "")).strip().lower()
-            s = str(row.get("Сайт ЯндексКарты", "")).strip().lower()
+            s = normalize_site(str(row.get("Сайт ЯндексКарты", "")))
             tri_index.add((n, a, s))
 
     now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -229,7 +233,7 @@ def run_parser(search_query, log_func, company_limit=None):
     names = all_names[:len(links)]
     log_func(f"Найдено карточек: {len(names)}")
 
-    # Быстрая логика дублей по названию
+    # Быстрая логика дублей по названию (оставь, но работает только для stats, не для дублей)
     if df_main.shape[0] > 0 and "Название" in df_main.columns:
         names_in_db = set(str(n).strip().lower() for n in df_main["Название"].dropna().unique())
     else:
@@ -292,13 +296,17 @@ def run_parser(search_query, log_func, company_limit=None):
                         yacards_site = a_tag["href"].strip()
             except Exception as e:
                 yacards_site = ""
-            # --- новый дубль-контроль ---
-            key_tri = (actual_name.strip().lower(), actual_address.strip().lower(), yacards_site.strip().lower())
+
+            # ---- ДУБЛЬ-КОНТРОЛЬ по нормализованному триплету ----
+            norm_name = (actual_name or '').strip().lower()
+            norm_addr = (actual_address or '').strip().lower()
+            norm_yacards = normalize_site(yacards_site)
+            key_tri = (norm_name, norm_addr, norm_yacards)
             if key_tri in tri_index:
-                log_func(f"Пропущено по триплет-дублю: '{actual_name}' / '{actual_address}' / '{yacards_site}'")
+                log_func(f"Пропущено по триплет-дублю: '{norm_name}' / '{norm_addr}' / '{norm_yacards}'")
                 continue
             else:
-                log_func(f"Проходит первый контроль: '{actual_name}' / '{actual_address}' / '{yacards_site}'")
+                log_func(f"Проходит первый контроль: '{norm_name}' / '{norm_addr}' / '{norm_yacards}'")
 
             phone, website, address, email, site_phones, occupation = "","","","","",""
             soup = BeautifulSoup(driver.page_source, "html.parser")
@@ -422,6 +430,7 @@ def run_parser(search_query, log_func, company_limit=None):
             }
 
             companies.append(new_info)
+            tri_index.add(key_tri)  # Динамически обновляй после каждой записи!
 
             if len(companies) > 0:
                 df_add = pd.DataFrame([new_info])
