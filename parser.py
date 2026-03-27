@@ -89,14 +89,14 @@ def run_parser(search_query, log_func, company_limit=None):
     else:
         df_main = pd.DataFrame()
 
-    # build lookup for (name, address) -> email
-    base_index = {}
-    if not df_main.empty and "Название" in df_main.columns and "Адрес" in df_main.columns:
+    # ------ Индекс по (название, адрес, сайт ЯК) ------
+    tri_index = set()
+    if not df_main.empty and "Название" in df_main.columns and "Адрес" in df_main.columns and "Сайт ЯндексКарты" in df_main.columns:
         for _, row in df_main.iterrows():
             n = str(row.get("Название", "")).strip().lower()
             a = str(row.get("Адрес", "")).strip().lower()
-            e = str(row.get("Email", "")).strip()
-            base_index[(n, a)] = e
+            s = str(row.get("Сайт ЯндексКарты", "")).strip().lower()
+            tri_index.add((n, a, s))
 
     now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
@@ -171,7 +171,7 @@ def run_parser(search_query, log_func, company_limit=None):
                 url = site_url.rstrip("/") + pageurl
                 log_func(f"Загружаем: {url}")
                 time.sleep(2.5)
-                r = requests.get(url, timeout=10, headers=headers, verify=False)
+                r = requests.get(url, timeout=3, headers=headers, verify=False)
                 text = r.text
                 emails = re.findall(r'[\w\.-]+@[\w\.-]+', text)
                 for e in emails:
@@ -197,7 +197,7 @@ def run_parser(search_query, log_func, company_limit=None):
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
     wait = WebDriverWait(driver, 10)
     driver.get("https://yandex.ru/maps")
-    log_func("Отк��ыт Яндекс.Карты")
+    log_func("Открыт Яндекс.Карты")
     search_input = wait.until(EC.presence_of_element_located((By.TAG_NAME, "input")))
     log_func("Нашли поле поиска")
     search_input.send_keys(search_query)
@@ -213,7 +213,7 @@ def run_parser(search_query, log_func, company_limit=None):
     )
 
     cards = driver.find_elements(By.CSS_SELECTOR, "a[href*='/org/']")
-    log_func(f"После прокрутки найдено карт��чек: {len(cards)}")
+    log_func(f"После прокрутки найдено карточек: {len(cards)}")
 
     all_links, all_names = [], []
     for card in cards:
@@ -272,25 +272,34 @@ def run_parser(search_query, log_func, company_limit=None):
             time.sleep(4)
             # Вытаскиваем фактическое имя и адрес
             try:
-                actual_name = driver.find_element(By.TAG_NAME, "h1").text.strip().lower()
+                actual_name = driver.find_element(By.TAG_NAME, "h1").text.strip()
             except Exception as e:
                 actual_name = ""
             import bs4
             soup = bs4.BeautifulSoup(driver.page_source, "html.parser")
             try:
                 address_elem = soup.find("a", class_="business-contacts-view__address-link")
-                actual_address = address_elem.text.strip().lower() if address_elem else ""
+                actual_address = address_elem.text.strip() if address_elem else ""
             except Exception as e:
                 actual_address = ""
-            key = (actual_name, actual_address)
-            email_in_base = base_index.get(key, "")
-            if key in base_index and email_in_base:
-                log_func(f"Пропущено (уже был email): '{actual_name}' / '{actual_address}'")
+            # Сайт ЯндексКарты
+            yacards_site = ""
+            try:
+                url_div = soup.find("div", class_="business-urls-view__url")
+                if url_div:
+                    a_tag = url_div.find("a", class_="business-urls-view__link")
+                    if a_tag and a_tag.has_attr("href"):
+                        yacards_site = a_tag["href"].strip()
+            except Exception as e:
+                yacards_site = ""
+            # --- новый дубль-контроль ---
+            key_tri = (actual_name.strip().lower(), actual_address.strip().lower(), yacards_site.strip().lower())
+            if key_tri in tri_index:
+                log_func(f"Пропущено по триплет-дублю: '{actual_name}' / '{actual_address}' / '{yacards_site}'")
                 continue
-            elif key in base_index:
-                log_func(f"Парсим повторно (был дубль без email): '{actual_name}' / '{actual_address}'")
             else:
-                log_func(f"Новая компания: '{actual_name}' / '{actual_address}'")
+                log_func(f"Проходит первый контроль: '{actual_name}' / '{actual_address}' / '{yacards_site}'")
+
             phone, website, address, email, site_phones, occupation = "","","","","",""
             soup = BeautifulSoup(driver.page_source, "html.parser")
             try:
@@ -299,19 +308,16 @@ def run_parser(search_query, log_func, company_limit=None):
             except Exception as e:
                 log_func(f"Ошибка поиска названия: {e}")
             try:
-                # Сначала ищем современный div с телефоном
                 phone_elem = driver.find_element(By.CSS_SELECTOR, ".orgpage-phones-view__phone-number")
                 phone = phone_elem.text.strip()
                 log_func(f"Телефон (Яндекс): {phone}")
             except Exception:
                 try:
-                    # Если не нашли — старый способ (иногда встречается a[href^='tel'])
                     phone = driver.find_element(By.XPATH, "//a[contains(@href,'tel')]").text.strip()
                     log_func(f"Телефон (Яндекс): {phone}")
                 except Exception:
                     phone = ""
                     log_func("Телефон (Яндекс): не найден")
-            # Чистый адрес с a.business-contacts-view__address-link
             try:
                 address_elem = soup.find("a", class_="business-contacts-view__address-link")
                 address = address_elem.text.strip() if address_elem else ""
@@ -319,7 +325,6 @@ def run_parser(search_query, log_func, company_limit=None):
             except Exception as e:
                 address = ""
                 log_func("Не найден адрес!")
-            # Описание деятельности по категориям
             try:
                 occupation_items = []
                 cats_div = soup.find("div", class_="orgpage-categories-info-view")
@@ -412,7 +417,8 @@ def run_parser(search_query, log_func, company_limit=None):
                 "Email": email,
                 "Сайт": website,
                 "Адрес": actual_address,
-                "Описание деятельности": occupation
+                "Описание деятельности": occupation,
+                "Сайт ЯндексКарты": yacards_site
             }
 
             companies.append(new_info)
