@@ -268,10 +268,18 @@ def run_parser(search_query, log_func, company_limit=None):
             except Exception as e:
                 log_func(f"Ошибка поиска названия: {e}")
             try:
-                phone = driver.find_element(By.XPATH, "//a[contains(@href,'tel')]").text
+                # Сначала ищем современный div с телефоном
+                phone_elem = driver.find_element(By.CSS_SELECTOR, ".orgpage-phones-view__phone-number")
+                phone = phone_elem.text.strip()
                 log_func(f"Телефон (Яндекс): {phone}")
-            except:
-                log_func("Телефон (Яндекс): не найден")
+            except Exception:
+                try:
+                    # Если не нашли — старый способ (иногда встречается a[href^='tel'])
+                    phone = driver.find_element(By.XPATH, "//a[contains(@href,'tel')]").text.strip()
+                    log_func(f"Телефон (Яндекс): {phone}")
+                except Exception:
+                    phone = ""
+                    log_func("Телефон (Яндекс): не найден")
             # Чистый адрес с a.business-contacts-view__address-link
             try:
                 address_elem = soup.find("a", class_="business-contacts-view__address-link")
