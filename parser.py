@@ -1,35 +1,17 @@
 import customtkinter as ctk
 import threading
 import datetime
+import json
+import tkinter as tk
 from tkinter.scrolledtext import ScrolledText
 from tkinter import ttk, messagebox
 import pandas as pd
 import os
 import sys
 import re
-import time
-import requests
-import urllib.parse
 from threading import Event
 from queue import Queue, Empty
 import urllib3
-
-# ===== Selenium — импорт на уровне модуля, чтобы PyInstaller их видел =====
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options as ChromeOptions
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from bs4 import BeautifulSoup
-
-# webdriver_manager — опциональный, может не работать в exe без интернета
-try:
-    from webdriver_manager.chrome import ChromeDriverManager
-    HAS_WDM = True
-except ImportError:
-    HAS_WDM = False
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -41,23 +23,70 @@ else:
 
 os.chdir(BASE_DIR)
 
-# ==================== Константы ====================
-BLACK_DOMAINS = [
-    "vk.com", "avito.ru", "avito.com", "hh.ru", "ok.ru", "youtube.com",
-    "facebook.com", "instagram.com", "twitter.com", "t.me", "2gis.ru",
-    ".yandex.", "ya.ru", "mail.ru", "rb.ru", "google.com", "zoon.ru",
-    "orgpage.ru", "google.ru", "yandex.ru/maps", "rusprofile.ru",
-    ".clients.site", ".orgsinfo.ru", ".jsprav.ru", "yandex.ru/profile",
-    "ruscatalog.org"
-]
-MESSENGER_LINKS = (
-    "wa.me/", "t.me/", "viber.me/", "viber://", "telegram.me/", "telegram.org/"
-)
-FORBIDDEN_EMAILS = [
-    "support@maps.yandex.ru",
-    "webmaps-revolution@yandex-team.ru",
-    "m-maps@support.yandex.ru"
-]
+# ==================== Настройки JSON ====================
+SETTINGS_FILE = os.path.join(BASE_DIR, "settings.json")
+
+DEFAULT_SETTINGS = {
+    "timings": {
+        "after_search_enter": 5,
+        "loading_card": 4,
+        "yandex_search_wait": 8,
+        "captcha_wait": 15,
+        "between_site_pages": 2.5,
+        "site_request_timeout": 8,
+        "selenium_wait_timeout": 15,
+    },
+    "black_domains": [
+        "vk.com", "avito.ru", "avito.com", "hh.ru", "ok.ru", "youtube.com",
+        "facebook.com", "instagram.com", "twitter.com", "t.me", "2gis.ru",
+        ".yandex.", "ya.ru", "mail.ru", "rb.ru", "google.com", "zoon.ru",
+        "orgpage.ru", "google.ru", "yandex.ru/maps", "rusprofile.ru",
+        ".clients.site", ".orgsinfo.ru", ".jsprav.ru", "yandex.ru/profile",
+        "ruscatalog.org"
+    ],
+    "messenger_links": [
+        "wa.me/", "t.me/", "viber.me/", "viber://", "telegram.me/", "telegram.org/"
+    ],
+    "forbidden_emails": [
+        "support@maps.yandex.ru",
+        "webmaps-revolution@yandex-team.ru",
+        "m-maps@support.yandex.ru"
+    ],
+    "contact_pages": [
+        "", "/contacts", "/contact", "/kontakty", "/kontakt",
+        "/about", "/about-us", "/company", "/info", "/contact-us"
+    ]
+}
+
+
+def load_settings():
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                saved = json.load(f)
+            merged = DEFAULT_SETTINGS.copy()
+            for key in DEFAULT_SETTINGS:
+                if key in saved:
+                    if isinstance(DEFAULT_SETTINGS[key], dict):
+                        merged[key] = {**DEFAULT_SETTINGS[key], **saved[key]}
+                    else:
+                        merged[key] = saved[key]
+            return merged
+        except Exception:
+            pass
+    return DEFAULT_SETTINGS.copy()
+
+
+def save_settings(sett):
+    try:
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(sett, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        messagebox.showerror("Ошибка", f"Не удалось сохранить настройки:\n{e}")
+
+
+settings = load_settings()
+
 EXCEL_FILENAME = os.path.join(BASE_DIR, "contacts_database.xlsx")
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -66,6 +95,15 @@ parser_stop_event = Event()
 parser_pause_event = Event()
 log_file = None
 log_queue = Queue()
+
+# ==================== Цвета тёмной темы ====================
+C_BG = "#1a1a1a"
+C_BG2 = "#212223"
+C_BG3 = "#2b2b2b"
+C_FG = "#d6d6d6"
+C_ACCENT = "#1f6aa5"
+C_BORDER = "#444444"
+
 
 # ==================== Утилиты ====================
 
@@ -79,7 +117,7 @@ def cut_to_main_yamaps_card(link):
 def is_valid_email(email):
     if not isinstance(email, str) or "@" not in email or email.count("@") != 1:
         return False
-    if email.lower() in [x.lower() for x in FORBIDDEN_EMAILS]:
+    if email.lower() in [x.lower() for x in settings["forbidden_emails"]]:
         return False
     username, domain = email.split("@", 1)
     if not username or not domain:
@@ -101,7 +139,7 @@ def normalize_site(site_url):
 def black_domain(site):
     if not site:
         return False
-    return any(domain in site for domain in BLACK_DOMAINS)
+    return any(domain in site for domain in settings["black_domains"])
 
 
 def join_unique(items, limit=3):
@@ -115,52 +153,13 @@ def join_unique(items, limit=3):
     return '; '.join(uniq)
 
 
-def create_chrome_driver():
-    """Создаёт Chrome-драйвер с несколькими fallback-вариантами."""
-    options = webdriver.ChromeOptions()
-    options.add_argument("--start-maximized")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_experimental_option('excludeSwitches', ['enable-logging'])
-
-    # Способ 1: webdriver_manager (скачает нужную версию)
-    if HAS_WDM:
-        try:
-            service = Service(ChromeDriverManager().install())
-            return webdriver.Chrome(service=service, options=options)
-        except Exception:
-            pass
-
-    # Способ 2: chromedriver рядом с exe/скриптом
-    local_driver = os.path.join(BASE_DIR, "chromedriver.exe" if sys.platform == "win32" else "chromedriver")
-    if os.path.exists(local_driver):
-        try:
-            service = Service(executable_path=local_driver)
-            return webdriver.Chrome(service=service, options=options)
-        except Exception:
-            pass
-
-    # Способ 3: chromedriver в PATH
-    try:
-        return webdriver.Chrome(options=options)
-    except Exception as e:
-        raise RuntimeError(
-            f"Не удалось запустить Chrome.\n"
-            f"Положите chromedriver.exe рядом с программой или установите Chrome.\n"
-            f"Ошибка: {e}"
-        )
-
-
 # ==================== Потокобезопасный лог ====================
 
 def log_to_queue(msg):
-    """Вызывается из рабочего потока."""
     log_queue.put(msg)
 
 
 def process_log_queue():
-    """Вызывается из главного потока через root.after()."""
     global log_file
     try:
         while True:
@@ -180,7 +179,6 @@ def process_log_queue():
     root.after(100, process_log_queue)
 
 
-# ==================== Диалог из главного потока ====================
 dialog_event = Event()
 
 
@@ -197,17 +195,36 @@ def ask_manual_scroll():
 # ==================== Основной парсер ====================
 
 def run_parser(search_query, log_func, company_limit=None):
+    import time
+    import requests
+    import urllib.parse
+    from selenium import webdriver
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.common.keys import Keys
+    from selenium.webdriver.chrome.service import Service
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from bs4 import BeautifulSoup
+
+    try:
+        from webdriver_manager.chrome import ChromeDriverManager
+        service = Service(ChromeDriverManager().install())
+    except Exception:
+        service = Service()
+
     global parser_stop_event, parser_pause_event, log_file
 
-    # Конвертируем лимит
+    T = settings["timings"]
+    MESSENGER = settings["messenger_links"]
+    CONTACT_PAGES = settings["contact_pages"]
+
     if company_limit and str(company_limit).strip().isdigit():
         company_limit = int(company_limit)
     else:
         company_limit = None
 
     log_filename = os.path.join(
-        LOG_DIR,
-        f"log_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        LOG_DIR, f"log_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
     )
     log_file = open(log_filename, "w", encoding="utf-8")
 
@@ -219,7 +236,6 @@ def run_parser(search_query, log_func, company_limit=None):
     else:
         df_main = pd.DataFrame()
 
-    # Индекс дублей
     tri_index = set()
     if (not df_main.empty
             and "Название" in df_main.columns
@@ -242,22 +258,22 @@ def run_parser(search_query, log_func, company_limit=None):
         for query in search_variants:
             log_func(f"\nYandex search query: {query}")
             url = "https://yandex.ru/search/?text=" + urllib.parse.quote_plus(query)
-            log_func(f"Открываю Яндекс-поиск: {url}")
+            log_func(f"Открываю браузер с Яндекс-поиском: {url}")
             try:
                 driver.execute_script("window.open('');")
                 driver.switch_to.window(driver.window_handles[-1])
                 driver.get(url)
-                time.sleep(8)
+                time.sleep(T["yandex_search_wait"])
                 html = driver.page_source
                 if "smart-captcha" in html or "Капча" in html or "captcha" in html:
-                    log_func("⚠ Капча! Решите вручную в браузере, жду 15 сек...")
-                    time.sleep(15)
+                    log_func(f"⚠ Обнаружена капча! Решите вручную, жду {T['captcha_wait']} сек.")
+                    time.sleep(T["captcha_wait"])
                     html = driver.page_source
                 soup = BeautifulSoup(html, "html.parser")
                 all_links = []
                 for a in soup.find_all('a', href=True):
                     href = a['href']
-                    if any(x in href for x in MESSENGER_LINKS):
+                    if any(x in href for x in MESSENGER):
                         continue
                     if (href.startswith("http")
                             and not black_domain(href)
@@ -291,10 +307,7 @@ def run_parser(search_query, log_func, company_limit=None):
         if black_domain(site_url):
             pages_to_check = [""]
         else:
-            pages_to_check = [
-                "", "/contacts", "/contact", "/kontakty", "/kontakt",
-                "/about", "/about-us", "/company", "/info", "/contact-us"
-            ]
+            pages_to_check = list(CONTACT_PAGES)
         found_emails, found_phones = [], []
         for pageurl in pages_to_check:
             if black_domain(site_url) and pageurl != "":
@@ -302,8 +315,8 @@ def run_parser(search_query, log_func, company_limit=None):
             try:
                 url = site_url.rstrip("/") + pageurl
                 log_func(f"Загружаем: {url}")
-                time.sleep(2.5)
-                r = requests.get(url, timeout=8, headers=headers, verify=False)
+                time.sleep(T["between_site_pages"])
+                r = requests.get(url, timeout=T["site_request_timeout"], headers=headers, verify=False)
                 r.encoding = r.apparent_encoding
                 text = r.text
                 emails = re.findall(r'[\w\.-]+@[\w\.-]+', text)
@@ -322,12 +335,17 @@ def run_parser(search_query, log_func, company_limit=None):
                 continue
         return join_unique(found_emails), join_unique(found_phones)
 
-    # ==================== Запуск ====================
     driver = None
     try:
-        log_func("Запускаем Chrome...")
-        driver = create_chrome_driver()
-        wait = WebDriverWait(driver, 15)
+        options = webdriver.ChromeOptions()
+        options.add_argument("--start-maximized")
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_experimental_option('excludeSwitches', ['enable-logging'])
+
+        driver = webdriver.Chrome(service=service, options=options)
+        wait = WebDriverWait(driver, T["selenium_wait_timeout"])
         driver.get("https://yandex.ru/maps")
         log_func("Открыт Яндекс.Карты")
 
@@ -335,9 +353,9 @@ def run_parser(search_query, log_func, company_limit=None):
         log_func("Нашли поле поиска")
         search_input.send_keys(search_query)
         search_input.send_keys(Keys.ENTER)
-        time.sleep(5)
+        time.sleep(T["after_search_enter"])
 
-        log_func("Прокрутите список компаний до конца, затем нажмите OK.")
+        log_func("Прокрутите список компаний Яндекс.Карт до конца. Затем нажмите OK в появившемся окне.")
         dialog_event.clear()
         root.after(0, ask_manual_scroll)
         dialog_event.wait()
@@ -350,12 +368,12 @@ def run_parser(search_query, log_func, company_limit=None):
         for card in cards:
             try:
                 link = card.get_attribute("href")
-                card_name = card.text.strip() if card.text else ""
-                if link and "/org/" in link and not any(x in link for x in MESSENGER_LINKS):
+                name = card.text.strip() if card.text else ""
+                if link and "/org/" in link and not any(x in link for x in MESSENGER):
                     normalized_link = cut_to_main_yamaps_card(link)
                     if normalized_link not in seen_links:
                         seen_links.add(normalized_link)
-                        unique_card_pairs.append((card_name, normalized_link))
+                        unique_card_pairs.append((name, normalized_link))
             except Exception:
                 pass
 
@@ -368,52 +386,49 @@ def run_parser(search_query, log_func, company_limit=None):
 
         new_pairs = []
         dupe_count = 0
-        for card_name, link in unique_card_pairs:
-            if card_name and card_name.strip().lower() in names_in_db:
+        for name, link in unique_card_pairs:
+            if name and name.strip().lower() in names_in_db:
                 dupe_count += 1
             else:
-                new_pairs.append((card_name, link))
+                new_pairs.append((name, link))
 
         log_func("\n====== СТАТИСТИКА ПАРСИНГА ======")
-        log_func(f"Уникальных для парсинга: {len(new_pairs)}")
-        log_func(f"Дубликатов в базе: {dupe_count}")
+        log_func(f"Уникальных компаний для парсинга: {len(new_pairs)}")
+        log_func(f"Дубликатов (по имени в базе): {dupe_count}")
         if company_limit:
-            log_func(f"Лимит: {company_limit}")
+            log_func(f"Лимит парсинга: {company_limit} компаний")
         log_func("==========================\n")
 
         parser_stop_event.clear()
         companies_count = 0
 
-        for idx, (card_name, link) in enumerate(new_pairs, 1):
+        for idx, (name, link) in enumerate(new_pairs, 1):
             if parser_stop_event.is_set():
-                log_func("Остановлено оператором!")
+                log_func("Операция остановлена оператором!")
                 break
-
             if company_limit and companies_count >= company_limit:
-                log_func(f"Достигнут лимит: {company_limit}")
+                log_func(f"Достигнут лимит: {company_limit} компаний.")
                 break
-
             while parser_pause_event.is_set():
                 log_func("ПАРСЕР на паузе...")
                 time.sleep(1)
                 if parser_stop_event.is_set():
+                    log_func("Операция остановлена оператором на паузе!")
                     break
-
             if parser_stop_event.is_set():
                 break
 
-            log_func(f"\n=== Карточка {idx}/{len(new_pairs)} ===\nСсылка: {link}")
+            log_func(f"\n=== Парсим карточку {idx}/{len(new_pairs)} ===\nСсылка: {link}")
 
             try:
                 driver.get(link)
-                time.sleep(4)
-
+                time.sleep(T["loading_card"])
                 soup = BeautifulSoup(driver.page_source, "html.parser")
 
                 try:
                     actual_name = driver.find_element(By.TAG_NAME, "h1").text.strip()
                 except Exception:
-                    actual_name = card_name or ""
+                    actual_name = name or ""
 
                 actual_address = ""
                 try:
@@ -438,10 +453,9 @@ def run_parser(search_query, log_func, company_limit=None):
                 norm_yacards = normalize_site(yacards_site)
                 key_tri = (norm_name, norm_addr, norm_yacards)
                 if key_tri in tri_index:
-                    log_func(f"Пропуск (дубль): '{norm_name}'")
+                    log_func(f"Пропущено по триплет-дублю: '{norm_name}' / '{norm_addr}' / '{norm_yacards}'")
                     continue
-
-                log_func(f"Название: {actual_name}")
+                log_func(f"Проходит контроль дублей: '{norm_name}' / '{norm_addr}'")
 
                 phone = ""
                 try:
@@ -451,8 +465,8 @@ def run_parser(search_query, log_func, company_limit=None):
                     try:
                         phone = driver.find_element(By.XPATH, "//a[contains(@href,'tel')]").text.strip()
                     except Exception:
-                        pass
-                log_func(f"Телефон: {phone or 'не найден'}")
+                        phone = ""
+                log_func(f"Телефон (Яндекс): {phone or 'не найден'}")
                 log_func(f"Адрес: {actual_address or 'не найден'}")
 
                 occupation = ""
@@ -467,8 +481,8 @@ def run_parser(search_query, log_func, company_limit=None):
                     occupation = "; ".join(occupation_items)
                 except Exception:
                     pass
+                log_func(f"Деятельность: {occupation or 'не найдена'}")
 
-                # ======== Поиск email ==========
                 email = ""
                 website = ""
                 site_phones = ""
@@ -477,32 +491,34 @@ def run_parser(search_query, log_func, company_limit=None):
                 try:
                     page_source = driver.page_source
                     emails = re.findall(r'[\w\.-]+@[\w\.-]+', page_source)
-                    seen_emails = set()
+                    found_good = [e for e in emails if is_valid_email(e)]
+                    seen = set()
                     deduped = []
-                    for e in emails:
-                        if is_valid_email(e) and e.lower() not in seen_emails:
-                            seen_emails.add(e.lower())
+                    for e in found_good:
+                        if e.lower() not in seen:
+                            seen.add(e.lower())
                             deduped.append(e)
                     email = join_unique(deduped)
                     if email:
-                        log_func(f"Email (Я.Карты): {email}")
+                        log_func(f"Email на Я.Картах: {email}")
                     else:
-                        log_func("Email на Я.Картах не найден.")
+                        log_func("Email на Яндекс.Картах не найден.")
                 except Exception as e:
                     log_func(f"Ошибка поиска email: {e}")
 
-                # 2. Email с сайта
+                # 2. Email на сайте с Я.Карт
                 if not email:
                     try:
-                        site_el = driver.find_element(
+                        site_element = driver.find_element(
                             By.XPATH,
                             "//a[contains(@href,'http') and not(contains(@href,'yandex'))]"
                         )
-                        website = site_el.get_attribute("href")
-                        if website and (any(x in website for x in MESSENGER_LINKS) or black_domain(website)):
+                        website = site_element.get_attribute("href")
+                        if website and (any(x in website for x in MESSENGER) or black_domain(website)):
+                            log_func(f"Сайт исключён (мессенджер/чёрный список): {website}")
                             website = ""
                         elif website:
-                            log_func(f"Парсим сайт: {website}")
+                            log_func(f"Парсим email с сайта: {website}")
                     except Exception:
                         website = ""
                     if website:
@@ -519,41 +535,37 @@ def run_parser(search_query, log_func, company_limit=None):
 
                 # 3. Поиск через Яндекс
                 if not email:
-                    log_func("Ищем через Яндекс.Поиск...")
+                    log_func("Ищем по top-3 сайтов из Яндекс.Поиска...")
                     city = search_query.split()[-1] if search_query.strip() else ""
-                    found_sites = find_sites_from_yandex_via_selenium(driver, actual_name or card_name, city)
+                    found_sites = find_sites_from_yandex_via_selenium(
+                        driver, actual_name or name, city
+                    )
                     for i, site in enumerate(found_sites, 1):
-                        if any(x in site for x in MESSENGER_LINKS) or black_domain(site):
+                        if any(x in site for x in MESSENGER) or black_domain(site):
+                            log_func(f"Пропущена ссылка-исключение: {site}")
                             continue
                         log_func(f"Пробуем сайт #{i}: {site}")
                         try:
-                            email_cand, phone_cand = parse_contacts_from_site(site)
-                            if email_cand:
-                                email = email_cand
+                            email_candidate, phone_candidate = parse_contacts_from_site(site)
+                            if email_candidate:
+                                email = email_candidate
                                 website = site
-                                log_func(f"Email #{i}: {email}")
+                                log_func(f"Найден email на сайте #{i}: {email}")
                                 break
-                            if phone_cand and not site_phones:
-                                site_phones = phone_cand
+                            if phone_candidate and not site_phones:
+                                site_phones = phone_candidate
                         except Exception as e:
-                            log_func(f"Ошибка: {e}")
+                            log_func(f"Ошибка парсинга сайта: {e}")
                     if not email:
-                        log_func("Email не найден.")
+                        log_func("Email не найден ни на одном сайте.")
 
-                # Сохраняем
                 new_info = {
-                    "Дата поиска": now_str,
-                    "Запрос": search_query,
-                    "Название": actual_name,
-                    "Телефон (Яндекс)": phone,
-                    "Телефон (сайт)": site_phones,
-                    "Email": email,
-                    "Сайт": website,
-                    "Адрес": actual_address,
-                    "Описание деятельности": occupation,
-                    "Сайт ЯндексКарты": yacards_site
+                    "Дата поиска": now_str, "Запрос": search_query,
+                    "Название": actual_name, "Телефон (Яндекс)": phone,
+                    "Телефон (сайт)": site_phones, "Email": email,
+                    "Сайт": website, "Адрес": actual_address,
+                    "Описание деятельности": occupation, "Сайт ЯндексКарты": yacards_site
                 }
-
                 try:
                     df_add = pd.DataFrame([new_info])
                     if os.path.exists(EXCEL_FILENAME):
@@ -562,28 +574,31 @@ def run_parser(search_query, log_func, company_limit=None):
                     else:
                         df_final = df_add
                     df_final.to_excel(EXCEL_FILENAME, index=False)
-                    log_func("✅ Сохранено.")
+                    log_func("✅ Сохранено в базу.")
                 except Exception as e:
-                    log_func(f"⚠ Ошибка записи Excel: {e}")
+                    log_func(f"⚠ Ошибка сохранения в Excel: {e}")
 
                 tri_index.add(key_tri)
                 companies_count += 1
 
                 log_func(
-                    f"--- Итог ---\nEmail: {email}\nТелефон: {phone}\n"
-                    f"Сайт: {website}\nАдрес: {actual_address}"
+                    f"--- Итог по карточке ---\n"
+                    f"Email: {email}\nТелефон (Яндекс): {phone}\n"
+                    f"Телефон (сайт): {site_phones}\nСайт: {website}\n"
+                    f"Адрес: {actual_address}\nОписание: {occupation}"
                 )
 
             except Exception as e:
-                log_func(f"ОШИБКА: {e}")
+                log_func(f"ОШИБКА ГЛАВНОГО ЦИКЛА: {e}")
 
-        log_func(f"\n{'='*40}")
-        log_func(f"Готово! Добавлено: {companies_count}")
-        log_func(f"{'='*40}")
+        log_func(f"\n{'=' * 40}")
+        log_func(f"Парсинг завершён. Добавлено компаний: {companies_count}")
+        if companies_count == 0:
+            log_func("Ни одной новой компании не добавлено (всё дубли или пусто)")
+        log_func(f"{'=' * 40}")
 
     except Exception as e:
         log_func(f"КРИТИЧЕСКАЯ ОШИБКА: {e}")
-
     finally:
         if driver:
             try:
@@ -597,6 +612,161 @@ def run_parser(search_query, log_func, company_limit=None):
                 pass
 
 
+# ==================== Окно настроек ====================
+
+def open_settings_window():
+    global settings
+
+    sw = ctk.CTkToplevel(root)
+    sw.title("⚙ Настройки")
+    sw.geometry("750x720")
+    sw.transient(root)
+    sw.grab_set()
+    sw.configure(fg_color=C_BG)
+
+    tabview = ctk.CTkTabview(sw, width=710, height=580,
+                              fg_color=C_BG2,
+                              segmented_button_fg_color=C_BG,
+                              segmented_button_selected_color=C_ACCENT,
+                              segmented_button_selected_hover_color="#1a5a90",
+                              segmented_button_unselected_color=C_BG,
+                              segmented_button_unselected_hover_color="#333333")
+    tabview.pack(padx=15, pady=(15, 5), fill="both", expand=True)
+
+    tab_timings = tabview.add("⏱ Тайминги")
+    tab_black = tabview.add("🚫 Чёрный список")
+    tab_messenger = tabview.add("💬 Мессенджеры")
+    tab_emails = tabview.add("📧 Запр. email")
+    tab_pages = tabview.add("📄 Страницы")
+
+    # --- Тайминги ---
+    timing_labels = {
+        "after_search_enter":    "Ожидание после ввода запроса в Я.Карты",
+        "loading_card":          "Загрузка карточки компании",
+        "yandex_search_wait":    "Ожидание загрузки Яндекс.Поиска",
+        "captcha_wait":          "Ожидание решения капчи вручную",
+        "between_site_pages":    "Пауза между страницами сайта",
+        "site_request_timeout":  "Таймаут HTTP-запроса к сайту",
+        "selenium_wait_timeout": "Таймаут ожидания элемента (Selenium)",
+    }
+    timing_vars = {}
+
+    for key, label in timing_labels.items():
+        row = ctk.CTkFrame(tab_timings, fg_color="transparent")
+        row.pack(anchor="w", padx=10, pady=5, fill="x")
+        ctk.CTkLabel(row, text=label, anchor="w", width=400, text_color=C_FG).pack(side="left")
+        var = ctk.StringVar(value=str(settings["timings"].get(key, DEFAULT_SETTINGS["timings"][key])))
+        timing_vars[key] = var
+        ctk.CTkEntry(row, textvariable=var, width=70, font=("Consolas", 14),
+                     fg_color=C_BG3, text_color=C_FG, border_color=C_BORDER).pack(side="left", padx=(10, 0))
+        ctk.CTkLabel(row, text="сек", anchor="w", width=30, text_color="#888888").pack(side="left", padx=(6, 0))
+
+    # --- Редактор списков ---
+    def create_dark_list_editor(parent, items_list):
+        wrapper = ctk.CTkFrame(parent, fg_color="transparent")
+        wrapper.pack(padx=10, pady=5, fill="both", expand=True)
+
+        list_frame = ctk.CTkFrame(wrapper, fg_color=C_BG3, corner_radius=6)
+        list_frame.pack(fill="both", expand=True)
+
+        scrollbar = tk.Scrollbar(list_frame, orient="vertical",
+                                  bg=C_BG3, troughcolor=C_BG2,
+                                  activebackground=C_ACCENT, highlightthickness=0)
+        listbox = tk.Listbox(
+            list_frame, yscrollcommand=scrollbar.set,
+            bg=C_BG3, fg=C_FG, font=("Consolas", 12),
+            selectbackground=C_ACCENT, selectforeground="white",
+            activestyle="none", relief="flat", bd=0,
+            highlightthickness=1, highlightbackground=C_BORDER,
+            highlightcolor=C_ACCENT
+        )
+        scrollbar.config(command=listbox.yview)
+        listbox.pack(side="left", fill="both", expand=True, padx=(4, 0), pady=4)
+        scrollbar.pack(side="right", fill="y", pady=4, padx=(0, 4))
+
+        for item in items_list:
+            listbox.insert("end", item)
+
+        btn_frame = ctk.CTkFrame(wrapper, fg_color="transparent")
+        btn_frame.pack(pady=(8, 0), fill="x")
+
+        entry_var = ctk.StringVar()
+        ctk.CTkEntry(btn_frame, textvariable=entry_var, width=350, font=("Arial", 13),
+                     placeholder_text="Введите значение...",
+                     fg_color=C_BG3, text_color=C_FG, border_color=C_BORDER,
+                     placeholder_text_color="#666666").pack(side="left", padx=(0, 8))
+
+        def add_item():
+            val = entry_var.get().strip()
+            if val:
+                listbox.insert("end", val)
+                entry_var.set("")
+
+        def delete_selected():
+            sel = listbox.curselection()
+            if sel:
+                listbox.delete(sel[0])
+
+        ctk.CTkButton(btn_frame, text="➕ Добавить", command=add_item, width=120,
+                      fg_color=C_ACCENT).pack(side="left", padx=(0, 5))
+        ctk.CTkButton(btn_frame, text="🗑 Удалить", command=delete_selected, width=120,
+                      fg_color="#c0392b", hover_color="#e74c3c").pack(side="left")
+        return listbox
+
+    lb_black = create_dark_list_editor(tab_black, settings["black_domains"])
+    lb_messenger = create_dark_list_editor(tab_messenger, settings["messenger_links"])
+    lb_emails = create_dark_list_editor(tab_emails, settings["forbidden_emails"])
+    lb_pages = create_dark_list_editor(tab_pages, settings["contact_pages"])
+
+    # --- Кнопки внизу ---
+    bottom = ctk.CTkFrame(sw, fg_color="transparent")
+    bottom.pack(padx=15, pady=(5, 15), fill="x")
+
+    def do_save():
+        global settings
+        new_timings = {}
+        for key, var in timing_vars.items():
+            try:
+                val = float(var.get().replace(",", "."))
+                if val < 0:
+                    raise ValueError
+                new_timings[key] = val
+            except ValueError:
+                messagebox.showwarning("Ошибка",
+                                       f"Некорректное значение:\n«{timing_labels[key]}» = {var.get()}")
+                return
+
+        def lb_to_list(lb):
+            return [lb.get(i) for i in range(lb.size())]
+
+        settings = {
+            "timings": new_timings,
+            "black_domains": lb_to_list(lb_black),
+            "messenger_links": lb_to_list(lb_messenger),
+            "forbidden_emails": lb_to_list(lb_emails),
+            "contact_pages": lb_to_list(lb_pages),
+        }
+        save_settings(settings)
+        messagebox.showinfo("✅ Сохранено",
+                            "Настройки сохранены!\nБудут применены при следующем запуске парсинга.")
+        sw.destroy()
+
+    def do_reset():
+        global settings
+        if messagebox.askyesno("Сброс", "Вернуть все настройки к значениям по умолчанию?"):
+            settings = DEFAULT_SETTINGS.copy()
+            save_settings(settings)
+            messagebox.showinfo("Сброс", "Настройки сброшены.")
+            sw.destroy()
+
+    ctk.CTkButton(bottom, text="💾 Сохранить", command=do_save,
+                  width=200, height=40, font=("Arial", 14),
+                  fg_color=C_ACCENT).pack(side="left", padx=(0, 10))
+    ctk.CTkButton(bottom, text="🔄 Сбросить по умолчанию", command=do_reset,
+                  width=230, height=40, font=("Arial", 14),
+                  fg_color="#555555", hover_color="#777777").pack(side="left")
+
+
 # ==================== GUI ====================
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("dark-blue")
@@ -606,11 +776,74 @@ root.title("Яндекс-Карты КонтактПарсер")
 root.geometry("950x700")
 
 frame = ctk.CTkFrame(root)
-frame.pack(padx=15, pady=15, fill="both", expand=True)
+frame.pack(padx=15, pady=(0, 15), fill="both", expand=True)
 
+# ==================== Кастомное тёмное меню (CTk, без tkinter.Menu) ====================
+menu_bar = ctk.CTkFrame(root, height=32, fg_color=C_BG, corner_radius=0)
+menu_bar.pack(fill="x", side="top", before=frame)
+menu_bar.pack_propagate(False)
+
+file_dropdown = None
+
+
+def toggle_file_menu():
+    global file_dropdown
+    if file_dropdown is not None and file_dropdown.winfo_exists():
+        file_dropdown.destroy()
+        file_dropdown = None
+        return
+
+    x = btn_file.winfo_rootx() - root.winfo_rootx()
+    y = btn_file.winfo_rooty() - root.winfo_rooty() + btn_file.winfo_height()
+
+    file_dropdown = ctk.CTkFrame(root, fg_color=C_BG2, corner_radius=6,
+                                  border_width=1, border_color=C_BORDER)
+    file_dropdown.place(x=x, y=y)
+    file_dropdown.lift()
+
+    def on_settings():
+        file_dropdown.destroy()
+        open_settings_window()
+
+    def on_exit():
+        root.quit()
+
+    ctk.CTkButton(file_dropdown, text="⚙  Настройки", command=on_settings,
+                  width=180, height=30, anchor="w",
+                  fg_color="transparent", hover_color="#333333",
+                  text_color=C_FG, font=("Arial", 13)).pack(padx=4, pady=(4, 0))
+
+    sep = ctk.CTkFrame(file_dropdown, height=1, fg_color=C_BORDER)
+    sep.pack(fill="x", padx=8, pady=2)
+
+    ctk.CTkButton(file_dropdown, text="🚪  Выход", command=on_exit,
+                  width=180, height=30, anchor="w",
+                  fg_color="transparent", hover_color="#333333",
+                  text_color=C_FG, font=("Arial", 13)).pack(padx=4, pady=(0, 4))
+
+    def close_on_click(event):
+        global file_dropdown
+        if file_dropdown and file_dropdown.winfo_exists():
+            w = event.widget
+            try:
+                if not (str(w).startswith(str(file_dropdown)) or w == btn_file):
+                    file_dropdown.destroy()
+                    file_dropdown = None
+            except Exception:
+                pass
+
+    root.bind("<Button-1>", close_on_click, add="+")
+
+
+btn_file = ctk.CTkButton(menu_bar, text="Файл", command=toggle_file_menu,
+                          width=60, height=26, font=("Arial", 13),
+                          fg_color="transparent", hover_color="#333333",
+                          text_color=C_FG, corner_radius=4)
+btn_file.pack(side="left", padx=(6, 0), pady=3)
+
+# ==================== Основной интерфейс ====================
 query_var = ctk.StringVar(value="металлообработка Подольск")
 limit_var = ctk.StringVar(value="")
-
 database_window = None
 db_tree = None
 db_columns = None
@@ -632,19 +865,14 @@ def do_parse():
     def reenable():
         t.join()
         root.after(0, lambda: btn_parse.configure(state="normal"))
-
     threading.Thread(target=reenable, daemon=True).start()
 
 
-lbl_query = ctk.CTkLabel(frame, text="Поисковый запрос:", anchor="w")
-lbl_query.pack(anchor="w", pady=(4, 4))
-query_entry = ctk.CTkEntry(frame, textvariable=query_var, width=500, font=("Arial", 15))
-query_entry.pack(anchor="w", pady=(0, 12))
+ctk.CTkLabel(frame, text="Поисковый запрос:", anchor="w").pack(anchor="w", pady=(4, 4))
+ctk.CTkEntry(frame, textvariable=query_var, width=500, font=("Arial", 15)).pack(anchor="w", pady=(0, 12))
 
-lbl_limit = ctk.CTkLabel(frame, text="Сколько компаний парсить? (пусто = все)", anchor="w")
-lbl_limit.pack(anchor="w")
-limit_entry = ctk.CTkEntry(frame, textvariable=limit_var, width=100, font=("Arial", 15))
-limit_entry.pack(anchor="w", pady=(0, 18))
+ctk.CTkLabel(frame, text="Сколько компаний парсить? (пусто = все)", anchor="w").pack(anchor="w")
+ctk.CTkEntry(frame, textvariable=limit_var, width=100, font=("Arial", 15)).pack(anchor="w", pady=(0, 18))
 
 btn_parse = ctk.CTkButton(frame, text="Начать парсинг", command=do_parse, width=200, height=42)
 btn_parse.pack(anchor="w", pady=(0, 14))
@@ -652,43 +880,22 @@ btn_parse.pack(anchor="w", pady=(0, 14))
 control_frame = ctk.CTkFrame(frame, fg_color="transparent")
 control_frame.pack(anchor="w", pady=(0, 14))
 
-btn_pause = ctk.CTkButton(
-    control_frame, text="⏸ Пауза",
-    command=lambda: parser_pause_event.set(),
-    width=140, fg_color="orange"
-)
-btn_pause.pack(side="left", padx=(0, 8))
+ctk.CTkButton(control_frame, text="⏸ Пауза", command=lambda: parser_pause_event.set(),
+              width=140, fg_color="orange").pack(side="left", padx=(0, 8))
+ctk.CTkButton(control_frame, text="▶ Продолжить", command=lambda: parser_pause_event.clear(),
+              width=140, fg_color="green").pack(side="left", padx=(0, 8))
+ctk.CTkButton(control_frame, text="⏹ Остановить", command=lambda: parser_stop_event.set(),
+              width=160, height=42, fg_color="red").pack(side="left", padx=(0, 8))
 
-btn_resume = ctk.CTkButton(
-    control_frame, text="▶ Продолжить",
-    command=lambda: parser_pause_event.clear(),
-    width=140, fg_color="green"
-)
-btn_resume.pack(side="left", padx=(0, 8))
+ctk.CTkButton(frame, text="📊 Посмотреть Базу", command=lambda: open_db_view(),
+              width=180, height=38).pack(anchor="w", pady=(0, 14))
 
-btn_stop = ctk.CTkButton(
-    control_frame, text="⏹ Остановить",
-    command=lambda: parser_stop_event.set(),
-    width=160, height=42, fg_color="red"
-)
-btn_stop.pack(side="left", padx=(0, 8))
-
-btn_dbview = ctk.CTkButton(
-    frame, text="📊 Посмотреть Базу",
-    command=lambda: open_db_view(),
-    width=180, height=38
-)
-btn_dbview.pack(anchor="w", pady=(0, 14))
-
-lbl_log = ctk.CTkLabel(frame, text="Сообщения отладки / ход работы:")
-lbl_log.pack(anchor="w", pady=(0, 5))
-log_text = ScrolledText(
-    frame, height=24, width=100,
-    bg="#212223", fg="#D6D6D6",
-    font=("Consolas", 12), wrap="word",
-    state="disabled", insertbackground="white"
-)
-log_text.pack(fill="both", expand=True, padx=(0, 0), pady=(0, 10))
+ctk.CTkLabel(frame, text="Сообщения отладки / ход работы:").pack(anchor="w", pady=(0, 5))
+log_text = ScrolledText(frame, height=24, width=100, bg=C_BG2, fg=C_FG,
+                         font=("Consolas", 12), wrap="word", state="disabled",
+                         insertbackground="white", relief="flat", bd=0,
+                         highlightthickness=1, highlightbackground=C_BORDER)
+log_text.pack(fill="both", expand=True, pady=(0, 10))
 
 
 def show_db_table(df):
@@ -712,35 +919,40 @@ def open_db_view():
             pass
         database_window.focus_set()
         return
-
     if not os.path.exists(EXCEL_FILENAME):
-        messagebox.showinfo("Нет базы", "Файл базы ещё не создан.")
+        messagebox.showinfo("Нет базы", "Файл базы ещё не создан. Сначала сделайте хотя бы один парсинг.")
         return
-
     df = pd.read_excel(EXCEL_FILENAME)
-
     database_window = ctk.CTkToplevel(root)
     database_window.title("Просмотр базы данных")
     database_window.geometry("1280x700")
-
     frm = ctk.CTkFrame(database_window)
     frm.pack(fill="both", expand=True, padx=10, pady=5)
-
     db_columns = list(df.columns)
-    db_tree = ttk.Treeview(frm, show="headings")
-    db_tree["columns"] = db_columns
-    style = ttk.Style(db_tree)
+
+    style = ttk.Style()
     style.theme_use("clam")
-    style.configure("Treeview.Heading", background="#1a1a1a", foreground="#d6d6d6", relief="flat")
+    style.configure("Dark.Treeview",
+                    background=C_BG3, foreground=C_FG, fieldbackground=C_BG3,
+                    borderwidth=0, relief="flat", rowheight=28, font=("Arial", 11))
+    style.configure("Dark.Treeview.Heading",
+                    background=C_BG, foreground=C_FG, relief="flat",
+                    borderwidth=0, font=("Arial", 11, "bold"))
+    style.map("Dark.Treeview",
+              background=[("selected", C_ACCENT)],
+              foreground=[("selected", "white")])
+    style.map("Dark.Treeview.Heading",
+              background=[("active", "#333333")])
+
+    db_tree = ttk.Treeview(frm, show="headings", style="Dark.Treeview")
+    db_tree["columns"] = db_columns
     for col in db_columns:
         db_tree.heading(col, text=col, anchor="w")
         db_tree.column(col, width=170, anchor="w")
     db_tree.pack(fill="both", expand=True, side="left")
-
     vsb = ttk.Scrollbar(frm, orient="vertical", command=db_tree.yview)
     db_tree.configure(yscrollcommand=vsb.set)
     vsb.pack(side="right", fill="y")
-
     show_db_table(df)
 
 
