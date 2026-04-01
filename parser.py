@@ -7,19 +7,39 @@ import pandas as pd
 import os
 import sys
 import re
+import time
+import requests
+import urllib.parse
 from threading import Event
 from queue import Queue, Empty
 import urllib3
 
+# ===== Selenium — импорт на уровне модуля, чтобы PyInstaller их видел =====
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options as ChromeOptions
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from bs4 import BeautifulSoup
+
+# webdriver_manager — опциональный, может не работать в exe без интернета
+try:
+    from webdriver_manager.chrome import ChromeDriverManager
+    HAS_WDM = True
+except ImportError:
+    HAS_WDM = False
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# ==================== Определяем базовую директорию (для PyInstaller) ====================
+# ==================== Базовая директория (для PyInstaller) ====================
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-os.chdir(BASE_DIR)  # Гарантируем, что рабочая директория — папка с exe/скриптом
+os.chdir(BASE_DIR)
 
 # ==================== Константы ====================
 BLACK_DOMAINS = [
@@ -45,10 +65,9 @@ os.makedirs(LOG_DIR, exist_ok=True)
 parser_stop_event = Event()
 parser_pause_event = Event()
 log_file = None
-
-# ==================== Потокобезопасная очередь для логов ====================
 log_queue = Queue()
 
+# ==================== Утилиты ====================
 
 def cut_to_main_yamaps_card(link):
     m = re.match(r"^(https://yandex\.[^/]+/maps/org/[^/]+/\d+)", link)
@@ -96,14 +115,52 @@ def join_unique(items, limit=3):
     return '; '.join(uniq)
 
 
+def create_chrome_driver():
+    """Создаёт Chrome-драйвер с несколькими fallback-вариантами."""
+    options = webdriver.ChromeOptions()
+    options.add_argument("--start-maximized")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_experimental_option('excludeSwitches', ['enable-logging'])
+
+    # Способ 1: webdriver_manager (скачает нужную версию)
+    if HAS_WDM:
+        try:
+            service = Service(ChromeDriverManager().install())
+            return webdriver.Chrome(service=service, options=options)
+        except Exception:
+            pass
+
+    # Способ 2: chromedriver рядом с exe/скриптом
+    local_driver = os.path.join(BASE_DIR, "chromedriver.exe" if sys.platform == "win32" else "chromedriver")
+    if os.path.exists(local_driver):
+        try:
+            service = Service(executable_path=local_driver)
+            return webdriver.Chrome(service=service, options=options)
+        except Exception:
+            pass
+
+    # Способ 3: chromedriver в PATH
+    try:
+        return webdriver.Chrome(options=options)
+    except Exception as e:
+        raise RuntimeError(
+            f"Не удалось запустить Chrome.\n"
+            f"Положите chromedriver.exe рядом с программой или установите Chrome.\n"
+            f"Ошибка: {e}"
+        )
+
+
 # ==================== Потокобезопасный лог ====================
+
 def log_to_queue(msg):
-    """Вызывается из рабочего потока — кладёт сообщение в очередь."""
+    """Вызывается из рабочего потока."""
     log_queue.put(msg)
 
 
 def process_log_queue():
-    """Вызывается из главного потока через root.after() — обрабатывает очередь."""
+    """Вызывается из главного потока через root.after()."""
     global log_file
     try:
         while True:
@@ -112,7 +169,6 @@ def process_log_queue():
             log_text.insert("end", msg + "\n")
             log_text.see("end")
             log_text.configure(state="disabled")
-            # Пишем в файл
             try:
                 if log_file:
                     log_file.write(msg + '\n')
@@ -121,15 +177,14 @@ def process_log_queue():
                 pass
     except Empty:
         pass
-    root.after(100, process_log_queue)  # Повторяем каждые 100мс
+    root.after(100, process_log_queue)
 
 
-# ==================== Диалог из главного потока через очередь ====================
+# ==================== Диалог из главного потока ====================
 dialog_event = Event()
 
 
 def ask_manual_scroll():
-    """Показывает диалог из главного потока."""
     messagebox.showinfo(
         "Ручная Прокрутка",
         "Прокрутите список организаций в Яндекс.Картах до НИЗУ ВРУЧНУЮ "
@@ -140,25 +195,8 @@ def ask_manual_scroll():
 
 
 # ==================== Основной парсер ====================
+
 def run_parser(search_query, log_func, company_limit=None):
-    import time
-    import requests
-    import urllib.parse
-    from selenium import webdriver
-    from selenium.webdriver.common.by import By
-    from selenium.webdriver.common.keys import Keys
-    from selenium.webdriver.chrome.service import Service
-    from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.support import expected_conditions as EC
-    from bs4 import BeautifulSoup
-
-    # Пытаемся использовать webdriver-manager, но если нет — просто Chrome()
-    try:
-        from webdriver_manager.chrome import ChromeDriverManager
-        service = Service(ChromeDriverManager().install())
-    except Exception:
-        service = Service()  # Попробует найти chromedriver в PATH
-
     global parser_stop_event, parser_pause_event, log_file
 
     # Конвертируем лимит
@@ -181,7 +219,7 @@ def run_parser(search_query, log_func, company_limit=None):
     else:
         df_main = pd.DataFrame()
 
-    # Индекс дублей по (название, адрес, сайт ЯК)
+    # Индекс дублей
     tri_index = set()
     if (not df_main.empty
             and "Название" in df_main.columns
@@ -204,7 +242,7 @@ def run_parser(search_query, log_func, company_limit=None):
         for query in search_variants:
             log_func(f"\nYandex search query: {query}")
             url = "https://yandex.ru/search/?text=" + urllib.parse.quote_plus(query)
-            log_func(f"Открываю браузер с Яндекс-поиском: {url}")
+            log_func(f"Открываю Яндекс-поиск: {url}")
             try:
                 driver.execute_script("window.open('');")
                 driver.switch_to.window(driver.window_handles[-1])
@@ -212,7 +250,7 @@ def run_parser(search_query, log_func, company_limit=None):
                 time.sleep(8)
                 html = driver.page_source
                 if "smart-captcha" in html or "Капча" in html or "captcha" in html:
-                    log_func("⚠ Обнаружена капча! Решите её вручную в окне браузера, затем подождите 15 сек.")
+                    log_func("⚠ Капча! Решите вручную в браузере, жду 15 сек...")
                     time.sleep(15)
                     html = driver.page_source
                 soup = BeautifulSoup(html, "html.parser")
@@ -235,7 +273,6 @@ def run_parser(search_query, log_func, company_limit=None):
                     return all_links
             except Exception as e:
                 log_func(f"Ошибка поиска через Яндекс: {e}")
-                # Вернуться к основному окну если что-то пошло не так
                 try:
                     if len(driver.window_handles) > 1:
                         driver.close()
@@ -285,21 +322,14 @@ def run_parser(search_query, log_func, company_limit=None):
                 continue
         return join_unique(found_emails), join_unique(found_phones)
 
-    # ==================== Запуск Selenium ====================
+    # ==================== Запуск ====================
     driver = None
     try:
-        options = webdriver.ChromeOptions()
-        options.add_argument("--start-maximized")
-        options.add_argument("--disable-blink-features=AutomationControlled")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        # Отключаем логи DevTools, чтобы не засорять консоль
-        options.add_experimental_option('excludeSwitches', ['enable-logging'])
-
-        driver = webdriver.Chrome(service=service, options=options)
+        log_func("Запускаем Chrome...")
+        driver = create_chrome_driver()
         wait = WebDriverWait(driver, 15)
         driver.get("https://yandex.ru/maps")
-        log_func("Открыт Яннекс.Карты")
+        log_func("Открыт Яндекс.Карты")
 
         search_input = wait.until(EC.presence_of_element_located((By.TAG_NAME, "input")))
         log_func("Нашли поле поиска")
@@ -307,34 +337,30 @@ def run_parser(search_query, log_func, company_limit=None):
         search_input.send_keys(Keys.ENTER)
         time.sleep(5)
 
-        # Показываем диалог из ГЛАВНОГО потока
-        log_func("Прокрутите список компаний Яндекс.Карт до конца. Затем нажмите OK в появившемся окне.")
+        log_func("Прокрутите список компаний до конца, затем нажмите OK.")
         dialog_event.clear()
         root.after(0, ask_manual_scroll)
-        # Ждём, пока пользователь нажмёт OK
         dialog_event.wait()
 
         cards = driver.find_elements(By.CSS_SELECTOR, "a[href*='/org/']")
         log_func(f"После прокрутки найдено карточек: {len(cards)}")
 
-        # Собираем пары (имя, ссылка) с сохранением порядка и уникальностью
         seen_links = set()
         unique_card_pairs = []
         for card in cards:
             try:
                 link = card.get_attribute("href")
-                name = card.text.strip() if card.text else ""
+                card_name = card.text.strip() if card.text else ""
                 if link and "/org/" in link and not any(x in link for x in MESSENGER_LINKS):
                     normalized_link = cut_to_main_yamaps_card(link)
                     if normalized_link not in seen_links:
                         seen_links.add(normalized_link)
-                        unique_card_pairs.append((name, normalized_link))
+                        unique_card_pairs.append((card_name, normalized_link))
             except Exception:
                 pass
 
         log_func(f"Уникальных карточек: {len(unique_card_pairs)}")
 
-        # Фильтрация дублей по имени из базы
         if df_main.shape[0] > 0 and "Название" in df_main.columns:
             names_in_db = set(str(n).strip().lower() for n in df_main["Название"].dropna().unique())
         else:
@@ -342,42 +368,41 @@ def run_parser(search_query, log_func, company_limit=None):
 
         new_pairs = []
         dupe_count = 0
-        for name, link in unique_card_pairs:
-            if name and name.strip().lower() in names_in_db:
+        for card_name, link in unique_card_pairs:
+            if card_name and card_name.strip().lower() in names_in_db:
                 dupe_count += 1
             else:
-                new_pairs.append((name, link))
+                new_pairs.append((card_name, link))
 
         log_func("\n====== СТАТИСТИКА ПАРСИНГА ======")
-        log_func(f"Уникальных компаний для парсинга: {len(new_pairs)}")
-        log_func(f"Дубликатов (по имени в базе): {dupe_count}")
+        log_func(f"Уникальных для парсинга: {len(new_pairs)}")
+        log_func(f"Дубликатов в базе: {dupe_count}")
         if company_limit:
-            log_func(f"Лимит парсинга: {company_limit} компаний")
+            log_func(f"Лимит: {company_limit}")
         log_func("==========================\n")
 
         parser_stop_event.clear()
         companies_count = 0
 
-        for idx, (name, link) in enumerate(new_pairs, 1):
+        for idx, (card_name, link) in enumerate(new_pairs, 1):
             if parser_stop_event.is_set():
-                log_func("Операция остановлена оператором!")
+                log_func("Остановлено оператором!")
                 break
 
             if company_limit and companies_count >= company_limit:
-                log_func(f"Достигнут лимит: {company_limit} компаний.")
+                log_func(f"Достигнут лимит: {company_limit}")
                 break
 
             while parser_pause_event.is_set():
                 log_func("ПАРСЕР на паузе...")
                 time.sleep(1)
                 if parser_stop_event.is_set():
-                    log_func("Операция остановлена оператором на паузе!")
                     break
 
             if parser_stop_event.is_set():
                 break
 
-            log_func(f"\n=== Парсим карточку {idx}/{len(new_pairs)} ===\nСсылка: {link}")
+            log_func(f"\n=== Карточка {idx}/{len(new_pairs)} ===\nСсылка: {link}")
 
             try:
                 driver.get(link)
@@ -385,13 +410,11 @@ def run_parser(search_query, log_func, company_limit=None):
 
                 soup = BeautifulSoup(driver.page_source, "html.parser")
 
-                # Фактическое имя
                 try:
                     actual_name = driver.find_element(By.TAG_NAME, "h1").text.strip()
                 except Exception:
-                    actual_name = name or ""
+                    actual_name = card_name or ""
 
-                # Адрес
                 actual_address = ""
                 try:
                     address_elem = soup.find("a", class_="business-contacts-view__address-link")
@@ -400,7 +423,6 @@ def run_parser(search_query, log_func, company_limit=None):
                 except Exception:
                     pass
 
-                # Сайт ЯндексКарты
                 yacards_site = ""
                 try:
                     url_div = soup.find("div", class_="business-urls-view__url")
@@ -411,17 +433,16 @@ def run_parser(search_query, log_func, company_limit=None):
                 except Exception:
                     pass
 
-                # Дубль-контроль по триплету
                 norm_name = (actual_name or '').strip().lower()
                 norm_addr = (actual_address or '').strip().lower()
                 norm_yacards = normalize_site(yacards_site)
                 key_tri = (norm_name, norm_addr, norm_yacards)
                 if key_tri in tri_index:
-                    log_func(f"Пропущено по триплет-дублю: '{norm_name}' / '{norm_addr}' / '{norm_yacards}'")
+                    log_func(f"Пропуск (дубль): '{norm_name}'")
                     continue
-                log_func(f"Проходит контроль дублей: '{norm_name}' / '{norm_addr}'")
 
-                # Телефон
+                log_func(f"Название: {actual_name}")
+
                 phone = ""
                 try:
                     phone_elem = driver.find_element(By.CSS_SELECTOR, ".orgpage-phones-view__phone-number")
@@ -430,13 +451,10 @@ def run_parser(search_query, log_func, company_limit=None):
                     try:
                         phone = driver.find_element(By.XPATH, "//a[contains(@href,'tel')]").text.strip()
                     except Exception:
-                        phone = ""
-                log_func(f"Телефон (Яндекс): {phone or 'не найден'}")
-
-                # Адрес (повторный парсинг из обновлённого soup не нужен, уже есть actual_address)
+                        pass
+                log_func(f"Телефон: {phone or 'не найден'}")
                 log_func(f"Адрес: {actual_address or 'не найден'}")
 
-                # Вид деятельности
                 occupation = ""
                 try:
                     occupation_items = []
@@ -449,9 +467,8 @@ def run_parser(search_query, log_func, company_limit=None):
                     occupation = "; ".join(occupation_items)
                 except Exception:
                     pass
-                log_func(f"Деятельность: {occupation or 'не найдена'}")
 
-                # ======== Поиск email по приоритету ==========
+                # ======== Поиск email ==========
                 email = ""
                 website = ""
                 site_phones = ""
@@ -460,35 +477,32 @@ def run_parser(search_query, log_func, company_limit=None):
                 try:
                     page_source = driver.page_source
                     emails = re.findall(r'[\w\.-]+@[\w\.-]+', page_source)
-                    found_good = [e for e in emails if is_valid_email(e)]
-                    # Убираем дубли с сохранением порядка
-                    seen = set()
+                    seen_emails = set()
                     deduped = []
-                    for e in found_good:
-                        if e.lower() not in seen:
-                            seen.add(e.lower())
+                    for e in emails:
+                        if is_valid_email(e) and e.lower() not in seen_emails:
+                            seen_emails.add(e.lower())
                             deduped.append(e)
                     email = join_unique(deduped)
                     if email:
-                        log_func(f"Email на Я.Картах: {email}")
+                        log_func(f"Email (Я.Карты): {email}")
                     else:
-                        log_func("Email на Яндекс.Картах не найден.")
+                        log_func("Email на Я.Картах не найден.")
                 except Exception as e:
                     log_func(f"Ошибка поиска email: {e}")
 
-                # 2. Email на сайте с Я.Карт
+                # 2. Email с сайта
                 if not email:
                     try:
-                        site_element = driver.find_element(
+                        site_el = driver.find_element(
                             By.XPATH,
                             "//a[contains(@href,'http') and not(contains(@href,'yandex'))]"
                         )
-                        website = site_element.get_attribute("href")
+                        website = site_el.get_attribute("href")
                         if website and (any(x in website for x in MESSENGER_LINKS) or black_domain(website)):
-                            log_func(f"Сайт исключён (мессенджер/чёрный список): {website}")
                             website = ""
                         elif website:
-                            log_func(f"Парсим email с сайта: {website}")
+                            log_func(f"Парсим сайт: {website}")
                     except Exception:
                         website = ""
                     if website:
@@ -505,31 +519,28 @@ def run_parser(search_query, log_func, company_limit=None):
 
                 # 3. Поиск через Яндекс
                 if not email:
-                    log_func("Ищем по top-3 сайтов из Яндекс.Поиска...")
+                    log_func("Ищем через Яндекс.Поиск...")
                     city = search_query.split()[-1] if search_query.strip() else ""
-                    found_sites = find_sites_from_yandex_via_selenium(
-                        driver, actual_name or name, city
-                    )
+                    found_sites = find_sites_from_yandex_via_selenium(driver, actual_name or card_name, city)
                     for i, site in enumerate(found_sites, 1):
                         if any(x in site for x in MESSENGER_LINKS) or black_domain(site):
-                            log_func(f"Пропущена ссылка-исключение: {site}")
                             continue
                         log_func(f"Пробуем сайт #{i}: {site}")
                         try:
-                            email_candidate, phone_candidate = parse_contacts_from_site(site)
-                            if email_candidate:
-                                email = email_candidate
+                            email_cand, phone_cand = parse_contacts_from_site(site)
+                            if email_cand:
+                                email = email_cand
                                 website = site
-                                log_func(f"Найден email на сайте #{i}: {email}")
+                                log_func(f"Email #{i}: {email}")
                                 break
-                            if phone_candidate and not site_phones:
-                                site_phones = phone_candidate
+                            if phone_cand and not site_phones:
+                                site_phones = phone_cand
                         except Exception as e:
-                            log_func(f"Ошибка парсинга сайта: {e}")
+                            log_func(f"Ошибка: {e}")
                     if not email:
-                        log_func("Email не найден ни на одном сайте.")
+                        log_func("Email не найден.")
 
-                # Сохраняем результат
+                # Сохраняем
                 new_info = {
                     "Дата поиска": now_str,
                     "Запрос": search_query,
@@ -543,7 +554,6 @@ def run_parser(search_query, log_func, company_limit=None):
                     "Сайт ЯндексКарты": yacards_site
                 }
 
-                # Записываем СРАЗУ в Excel (инкрементально)
                 try:
                     df_add = pd.DataFrame([new_info])
                     if os.path.exists(EXCEL_FILENAME):
@@ -552,40 +562,34 @@ def run_parser(search_query, log_func, company_limit=None):
                     else:
                         df_final = df_add
                     df_final.to_excel(EXCEL_FILENAME, index=False)
-                    log_func("✅ Сохранено в базу.")
+                    log_func("✅ Сохранено.")
                 except Exception as e:
-                    log_func(f"⚠ Ошибка сохранения в Excel: {e}")
+                    log_func(f"⚠ Ошибка записи Excel: {e}")
 
                 tri_index.add(key_tri)
                 companies_count += 1
 
                 log_func(
-                    f"--- Итог по карточке ---\n"
-                    f"Email: {email}\nТелефон (Яндекс): {phone}\n"
-                    f"Телефон (сайт): {site_phones}\nСайт: {website}\n"
-                    f"Адрес: {actual_address}\nОписание: {occupation}"
+                    f"--- Итог ---\nEmail: {email}\nТелефон: {phone}\n"
+                    f"Сайт: {website}\nАдрес: {actual_address}"
                 )
 
             except Exception as e:
-                log_func(f"ОШИБКА ГЛАВНОГО ЦИКЛА: {e}")
+                log_func(f"ОШИБКА: {e}")
 
         log_func(f"\n{'='*40}")
-        log_func(f"Парсинг завершён. Добавлено компаний: {companies_count}")
-        if companies_count == 0:
-            log_func("Ни одной новой компании не добавлено (всё дубли или пусто)")
+        log_func(f"Готово! Добавлено: {companies_count}")
         log_func(f"{'='*40}")
 
     except Exception as e:
         log_func(f"КРИТИЧЕСКАЯ ОШИБКА: {e}")
 
     finally:
-        # Гарантированно закрываем драйвер
         if driver:
             try:
                 driver.quit()
             except Exception:
                 pass
-        # Закрываем лог-файл
         if log_file:
             try:
                 log_file.close()
@@ -627,7 +631,6 @@ def do_parse():
 
     def reenable():
         t.join()
-        # Обновляем кнопку из главного потока
         root.after(0, lambda: btn_parse.configure(state="normal"))
 
     threading.Thread(target=reenable, daemon=True).start()
@@ -646,7 +649,6 @@ limit_entry.pack(anchor="w", pady=(0, 18))
 btn_parse = ctk.CTkButton(frame, text="Начать парсинг", command=do_parse, width=200, height=42)
 btn_parse.pack(anchor="w", pady=(0, 14))
 
-# Кнопки управления в одну линию
 control_frame = ctk.CTkFrame(frame, fg_color="transparent")
 control_frame.pack(anchor="w", pady=(0, 14))
 
@@ -695,10 +697,7 @@ def show_db_table(df):
         return
     db_tree.delete(*db_tree.get_children())
     for _, row in df.iterrows():
-        db_tree.insert(
-            "", "end",
-            values=[str(row[c]) if pd.notna(row[c]) else "" for c in db_columns]
-        )
+        db_tree.insert("", "end", values=[str(row[c]) if pd.notna(row[c]) else "" for c in db_columns])
 
 
 def open_db_view():
@@ -715,7 +714,7 @@ def open_db_view():
         return
 
     if not os.path.exists(EXCEL_FILENAME):
-        messagebox.showinfo("Нет базы", "Файл базы ещё не создан. Сначала сделайте хотя бы один парсинг.")
+        messagebox.showinfo("Нет базы", "Файл базы ещё не создан.")
         return
 
     df = pd.read_excel(EXCEL_FILENAME)
@@ -745,7 +744,5 @@ def open_db_view():
     show_db_table(df)
 
 
-# Запускаем обработчик очереди логов
 root.after(100, process_log_queue)
-
 root.mainloop()
