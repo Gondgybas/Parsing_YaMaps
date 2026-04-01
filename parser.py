@@ -1,3 +1,5 @@
+import sys
+import queue
 import customtkinter as ctk
 import threading
 import datetime
@@ -9,6 +11,12 @@ import re
 from threading import Event
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Determine base directory: works both for scripts and PyInstaller executables
+if getattr(sys, 'frozen', False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 BLACK_DOMAINS = [
     "vk.com", "avito.ru", "avito.com", "hh.ru", "ok.ru", "youtube.com", "facebook.com", "instagram.com",
@@ -24,14 +32,15 @@ FORBIDDEN_EMAILS = [
     "m-maps@support.yandex.ru"
 ]
 
-EXCEL_FILENAME = "contacts_database.xlsx"
-LOG_DIR = "logs"
+EXCEL_FILENAME = os.path.join(BASE_DIR, "contacts_database.xlsx")
+LOG_DIR = os.path.join(BASE_DIR, "logs")
 if not os.path.exists(LOG_DIR):
     os.makedirs(LOG_DIR)
 
 parser_stop_event = Event()
 parser_pause_event = Event()
 log_file = None
+_log_queue = queue.Queue()
 
 def cut_to_main_yamaps_card(link):
     m = re.match(r"^(https://yandex\.[^/]+/maps/org/[^/]+/\d+)", link)
@@ -53,11 +62,7 @@ def is_valid_email(email):
 
 def log(msg):
     global log_file
-    log_text.configure(state="normal")
-    log_text.insert("end", msg + "\n")
-    log_text.see("end")
-    log_text.configure(state="disabled")
-    root.update()
+    _log_queue.put(msg)
     try:
         if log_file:
             log_file.write(msg + '\n')
@@ -65,12 +70,23 @@ def log(msg):
     except Exception:
         pass
 
+def _process_log_queue():
+    for _ in range(20):  # Process at most 20 messages per cycle to keep UI responsive
+        try:
+            msg = _log_queue.get_nowait()
+            log_text.configure(state="normal")
+            log_text.insert("end", msg + "\n")
+            log_text.see("end")
+            log_text.configure(state="disabled")
+        except queue.Empty:
+            break
+    root.after(100, _process_log_queue)
+
 def run_parser(search_query, log_func, company_limit=None):
     import time, requests, urllib.parse
     from selenium import webdriver
     from selenium.webdriver.common.by import By
     from selenium.webdriver.common.keys import Keys
-    from webdriver_manager.chrome import ChromeDriverManager
     from selenium.webdriver.chrome.service import Service
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
@@ -198,7 +214,17 @@ def run_parser(search_query, log_func, company_limit=None):
 
     options = webdriver.ChromeOptions()
     options.add_argument("--start-maximized")
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    try:
+        # Selenium 4.6+ has a built-in driver manager — no internet download needed
+        driver = webdriver.Chrome(options=options)
+        log_func("ChromeDriver инициализирован через встроенный Selenium Manager.")
+    except Exception as _drv_err:
+        log_func(f"Встроенный Selenium Manager не сработал ({_drv_err}), пробуем webdriver_manager...")
+        from webdriver_manager.chrome import ChromeDriverManager
+        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+        log_func("ChromeDriver инициализирован через webdriver_manager.")
     wait = WebDriverWait(driver, 10)
     driver.get("https://yandex.ru/maps")
     log_func("Открыт Яндекс.Карты")
@@ -256,6 +282,13 @@ def run_parser(search_query, log_func, company_limit=None):
     parser_stop_event.clear()
     companies = []
 
+    if company_limit:
+        try:
+            unique_pairs = unique_pairs[:int(company_limit)]
+            log_func(f"Лимит установлен: будет обработано не более {int(company_limit)} компаний.")
+        except (ValueError, TypeError):
+            log_func(f"Предупреждение: некорректное значение лимита '{company_limit}', лимит проигнорирован.")
+
     for idx, (name, link) in enumerate(unique_pairs, 1):
         if parser_stop_event.is_set():
             log_func("Операция остановлена оператором!")
@@ -279,8 +312,7 @@ def run_parser(search_query, log_func, company_limit=None):
                 actual_name = driver.find_element(By.TAG_NAME, "h1").text.strip()
             except Exception as e:
                 actual_name = ""
-            import bs4
-            soup = bs4.BeautifulSoup(driver.page_source, "html.parser")
+            soup = BeautifulSoup(driver.page_source, "html.parser")
             try:
                 address_elem = soup.find("a", class_="business-contacts-view__address-link")
                 actual_address = address_elem.text.strip() if address_elem else ""
@@ -487,12 +519,12 @@ def do_parse():
     btn_parse.configure(state="disabled")
     query = query_var.get()
     limit = limit_var.get().strip()
-    t = threading.Thread(target=run_parser, args=(query, log, limit))
+    t = threading.Thread(target=run_parser, args=(query, log, limit), daemon=True)
     t.start()
     def reenable():
         t.join()
-        btn_parse.configure(state="normal")
-    threading.Thread(target=reenable).start()
+        root.after(0, lambda: btn_parse.configure(state="normal"))
+    threading.Thread(target=reenable, daemon=True).start()
 
 lbl_query = ctk.CTkLabel(frame, text="Поисковый запрос:", anchor="w")
 lbl_query.pack(anchor="w", pady=(4,4))
@@ -524,7 +556,6 @@ lbl_log.pack(anchor="w", pady=(0,5))
 log_text = ScrolledText(frame, height=24, width=100, bg="#212223", fg="#D6D6D6", font=("Consolas", 12), wrap="word", state="disabled", insertbackground="white")
 log_text.pack(fill="both", expand=True, padx=(0,0), pady=(0,10))
 
-database_window = None
 db_tree = None
 db_columns = None
 
@@ -578,4 +609,5 @@ def open_db_view():
 
     show_db_table(df)
 
+root.after(100, _process_log_queue)
 root.mainloop()
