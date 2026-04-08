@@ -614,15 +614,40 @@ def run_parser(search_query, log_func, company_limit=None):
 
 # ==================== Окно настроек ====================
 
+settings_window = None
+
+
 def open_settings_window():
-    global settings
+    global settings, settings_window
+
+    # Если окно уже открыто — поднять
+    if settings_window is not None:
+        try:
+            if settings_window.winfo_exists():
+                settings_window.focus_set()
+                settings_window.lift()
+                return
+        except Exception:
+            pass
+        settings_window = None
 
     sw = ctk.CTkToplevel(root)
+    settings_window = sw
     sw.title("⚙ Настройки")
     sw.geometry("750x720")
-    sw.transient(root)
-    sw.grab_set()
     sw.configure(fg_color=C_BG)
+
+    # НЕ используем grab_set() и transient() — они ломают повторное открытие
+    # Просто поднимаем окно наверх
+    sw.lift()
+    sw.focus_set()
+
+    def on_close():
+        global settings_window
+        sw.destroy()
+        settings_window = None
+
+    sw.protocol("WM_DELETE_WINDOW", on_close)
 
     tabview = ctk.CTkTabview(sw, width=710, height=580,
                               fg_color=C_BG2,
@@ -639,7 +664,6 @@ def open_settings_window():
     tab_emails = tabview.add("📧 Запр. email")
     tab_pages = tabview.add("📄 Страницы")
 
-    # --- Тайминги ---
     timing_labels = {
         "after_search_enter":    "Ожидание после ввода запроса в Я.Карты",
         "loading_card":          "Загрузка карточки компании",
@@ -661,14 +685,11 @@ def open_settings_window():
                      fg_color=C_BG3, text_color=C_FG, border_color=C_BORDER).pack(side="left", padx=(10, 0))
         ctk.CTkLabel(row, text="сек", anchor="w", width=30, text_color="#888888").pack(side="left", padx=(6, 0))
 
-    # --- Редактор списков ---
     def create_dark_list_editor(parent, items_list):
         wrapper = ctk.CTkFrame(parent, fg_color="transparent")
         wrapper.pack(padx=10, pady=5, fill="both", expand=True)
-
         list_frame = ctk.CTkFrame(wrapper, fg_color=C_BG3, corner_radius=6)
         list_frame.pack(fill="both", expand=True)
-
         scrollbar = tk.Scrollbar(list_frame, orient="vertical",
                                   bg=C_BG3, troughcolor=C_BG2,
                                   activebackground=C_ACCENT, highlightthickness=0)
@@ -683,13 +704,10 @@ def open_settings_window():
         scrollbar.config(command=listbox.yview)
         listbox.pack(side="left", fill="both", expand=True, padx=(4, 0), pady=4)
         scrollbar.pack(side="right", fill="y", pady=4, padx=(0, 4))
-
         for item in items_list:
             listbox.insert("end", item)
-
         btn_frame = ctk.CTkFrame(wrapper, fg_color="transparent")
         btn_frame.pack(pady=(8, 0), fill="x")
-
         entry_var = ctk.StringVar()
         ctk.CTkEntry(btn_frame, textvariable=entry_var, width=350, font=("Arial", 13),
                      placeholder_text="Введите значение...",
@@ -718,12 +736,11 @@ def open_settings_window():
     lb_emails = create_dark_list_editor(tab_emails, settings["forbidden_emails"])
     lb_pages = create_dark_list_editor(tab_pages, settings["contact_pages"])
 
-    # --- Кнопки внизу ---
     bottom = ctk.CTkFrame(sw, fg_color="transparent")
     bottom.pack(padx=15, pady=(5, 15), fill="x")
 
     def do_save():
-        global settings
+        global settings, settings_window
         new_timings = {}
         for key, var in timing_vars.items():
             try:
@@ -750,14 +767,16 @@ def open_settings_window():
         messagebox.showinfo("✅ Сохранено",
                             "Настройки сохранены!\nБудут применены при следующем запуске парсинга.")
         sw.destroy()
+        settings_window = None
 
     def do_reset():
-        global settings
+        global settings, settings_window
         if messagebox.askyesno("Сброс", "Вернуть все настройки к значениям по умолчанию?"):
             settings = DEFAULT_SETTINGS.copy()
             save_settings(settings)
             messagebox.showinfo("Сброс", "Настройки сброшены.")
             sw.destroy()
+            settings_window = None
 
     ctk.CTkButton(bottom, text="💾 Сохранить", command=do_save,
                   width=200, height=40, font=("Arial", 14),
